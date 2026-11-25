@@ -304,22 +304,161 @@ checkIcons() {
     fi
 }
 
-offerToDisableCachyUpdate() {
-    local isActive=0
-    asUser systemctl --user is-enabled arch-update.timer >/dev/null 2>&1 && isActive=1
-    asUser systemctl --user is-enabled arch-update-tray.service >/dev/null 2>&1 && isActive=1
-    pgrep -f arch-update-tray >/dev/null 2>&1 && isActive=1
-    ((isActive)) || return 0
+# ---------- cachy-update ----------
+# cachy-update (CachyOS's fork of arch-update) does the same job, so two
+# tray icons and two checks would compete. It is switched off without
+# touching the package's files:
+#   - arch-update.timer is enabled per user ("cachy-update --check --enable")
+#     or for everyone (systemctl --global): disable whichever is set.
+#   - the tray starts from /etc/xdg/autostart/arch-update-tray.desktop
+#     (shipped by the CachyOS package) or ~/.config/autostart/ (written by
+#     "cachy-update --tray --enable"). A user file with Hidden=true is the
+#     XDG way to switch an autostart entry off for one user; the user's own
+#     file, if any, is backed up first.
+# What was active is recorded, so uninstall can offer to turn exactly that
+# back on.
+readonly CACHY_TIMER=arch-update.timer
+readonly CACHY_TRAY_DESKTOP=arch-update-tray.desktop
+readonly CACHY_TRAY_PROCESS=arch-update-tray
+readonly CACHY_STATE_FILE=$PREFIX/disabled-cachy-update
+readonly CACHY_BACKUP_DIR=$PREFIX/cachy-update-backup
+readonly AUTOSTART_OVERRIDE_MARKER="X-Disabled-By=$APP_NAME"
+
+userAutostartFile() { echo "$TARGET_HOME/.config/autostart/$CACHY_TRAY_DESKTOP"; }
+userTimerLink()     { echo "$TARGET_HOME/.config/systemd/user/timers.target.wants/$CACHY_TIMER"; }
+isHiddenEntry()     { grep -qiE '^[[:space:]]*Hidden[[:space:]]*=[[:space:]]*true' "$1" 2>/dev/null; }
+isOurOverride()     { grep -qxF "$AUTOSTART_OVERRIDE_MARKER" "$1" 2>/dev/null; }
+
+# Does cachy-update's tray start at login for this user?
+cachyTrayAutostarts() {
+    local userFile
+    userFile="$(userAutostartFile)"
+    if [[ -f $userFile ]]; then
+        if isHiddenEntry "$userFile"; then return 1; fi
+        return 0
+    fi
+    [[ -f $AUTOSTART_DIR/$CACHY_TRAY_DESKTOP ]] && ! isHiddenEntry "$AUTOSTART_DIR/$CACHY_TRAY_DESKTOP"
+}
+
+# pgrep/pkill arguments that match cachy-update's tray of the target user
+cachyTrayProcessFilter() {
+    if [[ -n $TARGET_USER ]]; then
+        printf '%s\n' -u "$TARGET_USER" -f "$CACHY_TRAY_PROCESS"
+    else
+        printf '%s\n' -f "$CACHY_TRAY_PROCESS"
+    fi
+}
+
+disableCachyUpdate() {
+    local disabledItems=() userFile processFilter=()
+    mapfile -t processFilter < <(cachyTrayProcessFilter)
+
+    if [[ $(systemctl --global is-enabled "$CACHY_TIMER" 2>/dev/null) == enabled ]] \
+        && asRoot systemctl --global disable "$CACHY_TIMER" >/dev/null 2>&1; then
+        disabledItems+=(global-timer)
+    fi
+    if [[ -n $TARGET_HOME ]]; then
+        if [[ -L $(userTimerLink) || -e $(userTimerLink) ]] \
+            && asUser systemctl --user disable --now "$CACHY_TIMER" >/dev/null 2>&1; then
+            disabledItems+=(user-timer)
+        fi
+        # Also stops a timer that only the global setting had started
+        asUser systemctl --user stop "$CACHY_TIMER" >/dev/null 2>&1 || true
+
+        if cachyTrayAutostarts; then
+            userFile="$(userAutostartFile)"
+            if [[ -f $userFile ]]; then
+                asRoot install -Dm644 "$userFile" "$CACHY_BACKUP_DIR/$CACHY_TRAY_DESKTOP"
+                disabledItems+=(autostart-backup)
+            fi
+            asUser mkdir -p "$(dirname "$userFile")"
+            printf '[Desktop Entry]\nHidden=true\n%s\n' "$AUTOSTART_OVERRIDE_MARKER" | asUser tee "$userFile" >/dev/null
+            disabledItems+=(autostart-override)
+        fi
+    fi
+    if pgrep "${processFilter[@]}" >/dev/null 2>&1; then
+        pkill "${processFilter[@]}" 2>/dev/null || true
+        disabledItems+=(tray-running)
+    fi
+
+    if ((${#disabledItems[@]})); then
+        # Merge with an earlier install's record: a reinstall finds it already off
+        {
+            cat "$CACHY_STATE_FILE" 2>/dev/null || true
+            printf '%s\n' "${disabledItems[@]}"
+        } | sort -u | asRoot tee "$CACHY_STATE_FILE.tmp" >/dev/null
+        asRoot mv -f "$CACHY_STATE_FILE.tmp" "$CACHY_STATE_FILE"
+        printStep "cachy-update disabled ($(describeCachyItems "${disabledItems[@]}")); uninstall offers to turn it back on"
+    elif [[ -s $CACHY_STATE_FILE ]]; then
+        printStep "cachy-update: already disabled by an earlier install"
+    else
+        printStep "cachy-update: not active"
+    fi
+}
+
+describeCachyItems() {
+    local item descriptions=()
+    # Fixed order, whatever order the record lists them in
+    for item in global-timer user-timer autostart-override tray-running; do
+        printf '%s\n' "$@" | grep -qxF "$item" || continue
+        case $item in
+            global-timer)       descriptions+=("timer for all users") ;;
+            user-timer)         descriptions+=("timer") ;;
+            autostart-override) descriptions+=("tray at login") ;;
+            tray-running)       descriptions+=("running tray") ;;
+        esac
+    done
+    local IFS=,
+    local joined="${descriptions[*]}"
+    echo "${joined//,/, }"
+}
+
+# Offer to turn back on exactly what disableCachyUpdate turned off
+restoreCachyUpdate() {
+    local disabledItems=() userFile
+    [[ -s $CACHY_STATE_FILE ]] || return 0
+    mapfile -t disabledItems < "$CACHY_STATE_FILE"
+    userFile="$(userAutostartFile)"
+    hasItem() { printf '%s\n' "${disabledItems[@]}" | grep -qxF "$1"; }
 
     echo
-    printWarning "cachy-update is also active (you would get two icons and two checks)."
-    if confirm "Disable cachy-update's timer and tray? (the package stays installed)" Y; then
-        asRoot systemctl --global disable arch-update.timer arch-update-tray.service >/dev/null 2>&1 || true
-        asUser systemctl --user disable --now arch-update.timer arch-update-tray.service >/dev/null 2>&1 || true
-        [[ -n $TARGET_HOME ]] && rm -f "$TARGET_HOME"/.config/autostart/{arch,cachy}-update-tray.desktop
-        pkill -f arch-update-tray 2>/dev/null || true
-        printStep "cachy-update disabled (turn it back on in CachyOS Hello whenever you want)"
+    if ! command -v arch-update >/dev/null 2>&1; then
+        printStep "cachy-update was active before $APP_NAME, but it is no longer installed"
+        [[ -n $TARGET_HOME ]] && isOurOverride "$userFile" && asUser rm -f "$userFile"
+        return 0
     fi
+    printInfo "cachy-update was active before $APP_NAME was installed ($(describeCachyItems "${disabledItems[@]}"))."
+    if ! confirm "Turn cachy-update back on?" Y; then
+        printStep "cachy-update left off"
+        if [[ -n $TARGET_HOME ]] && isOurOverride "$userFile"; then
+            echo "   Its tray stays off at login through $userFile; delete that file to undo it."
+        fi
+        return 0
+    fi
+
+    if hasItem global-timer; then
+        asRoot systemctl --global enable "$CACHY_TIMER" >/dev/null 2>&1 || printWarning "could not re-enable $CACHY_TIMER globally"
+    fi
+    if [[ -n $TARGET_HOME ]]; then
+        if hasItem user-timer; then
+            asUser systemctl --user enable --now "$CACHY_TIMER" >/dev/null 2>&1 || printWarning "could not re-enable $CACHY_TIMER"
+        elif hasItem global-timer; then
+            asUser systemctl --user start "$CACHY_TIMER" >/dev/null 2>&1 || true
+        fi
+        if hasItem autostart-override && isOurOverride "$userFile"; then
+            if hasItem autostart-backup && [[ -f $CACHY_BACKUP_DIR/$CACHY_TRAY_DESKTOP ]]; then
+                asUser install -Dm644 "$CACHY_BACKUP_DIR/$CACHY_TRAY_DESKTOP" "$userFile"
+            else
+                asUser rm -f "$userFile"
+            fi
+        fi
+    fi
+    # Start its tray now in the current graphical session
+    if { hasItem tray-running || hasItem autostart-override; } \
+        && ((EUID != 0)) && [[ -n ${WAYLAND_DISPLAY:-}${DISPLAY:-} ]]; then
+        setsid arch-update --tray >/dev/null 2>&1 < /dev/null &
+    fi
+    printStep "cachy-update turned back on"
 }
 
 # ---------- commands ----------
@@ -335,9 +474,9 @@ cmdInstall() {
     recordInstalledPackages
     installFiles
     ensureAppman
+    disableCachyUpdate
     enableServices
     checkIcons
-    offerToDisableCachyUpdate
 
     echo
     printInfo "Done! Run '$APP_NAME' in a terminal or click the tray icon."
@@ -413,9 +552,14 @@ cmdUninstall() {
 
     asRoot rm -f "$BIN_LINK" "$APPLICATIONS_DIR/$APP_NAME.desktop" "$AUTOSTART_DIR/$APP_NAME-tray.desktop" \
                  "$USER_UNIT_DIR/$APP_NAME.service" "$USER_UNIT_DIR/$APP_NAME.timer" "$PACMAN_HOOK"
+    asUser systemctl --user daemon-reload >/dev/null 2>&1 || true
+    # Our timer and tray are gone: now cachy-update can come back. It needs
+    # the record and the backup in $PREFIX, so it runs before $PREFIX is deleted.
+    local hadCachyRecord=0
+    [[ -s $CACHY_STATE_FILE ]] && hadCachyRecord=1
+    restoreCachyUpdate
     # $PREFIX holds the tray virtualenv too, so this removes PyQt6 as well
     asRoot rm -rf "$PREFIX"
-    asUser systemctl --user daemon-reload >/dev/null 2>&1 || true
     printStep "files removed (including the tray virtualenv)"
 
     if ((purge)); then
@@ -431,7 +575,9 @@ cmdUninstall() {
 
     echo
     printInfo "$APP_NAME removed."
-    echo "   To go back to cachy-update: CachyOS Hello > Apps/Tweaks > Cachy Update"
+    if ((!hadCachyRecord)) && command -v arch-update >/dev/null 2>&1; then
+        echo "   To use cachy-update: CachyOS Hello > Apps/Tweaks > Cachy Update"
+    fi
 }
 
 # Offer to remove the packages the installer added (only those still installed)
@@ -492,6 +638,13 @@ cmdStatus() {
     printInfo "Services"
     printStep "timer: $(asUser systemctl --user is-active "$APP_NAME.timer" 2>/dev/null || echo inactive)"
     if pgrep -f "$APP_NAME-tray.py" >/dev/null; then printStep "tray: running"; else printStep "tray: stopped"; fi
+    if [[ -s $CACHY_STATE_FILE ]]; then
+        local cachyItems=()
+        mapfile -t cachyItems < "$CACHY_STATE_FILE"
+        printStep "cachy-update: disabled by $APP_NAME ($(describeCachyItems "${cachyItems[@]}")); uninstall offers to turn it back on"
+    elif command -v arch-update >/dev/null 2>&1; then
+        printStep "cachy-update: installed, not disabled by $APP_NAME"
+    fi
 }
 
 # ---------- main ----------

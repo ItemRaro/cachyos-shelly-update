@@ -9,6 +9,26 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-25
+
+### Changed
+- Installing turns cachy-update off without asking (two trays and two
+  checks would compete) and records what was on: its timer, per user or for
+  all users, its tray at login and the running tray.
+- Uninstalling asks whether to turn cachy-update back on when it was on
+  before the install, and restores exactly that, including the user's own
+  `~/.config/autostart/arch-update-tray.desktop`.
+- `install.sh status` shows whether cachy-update was turned off by the
+  installer.
+
+### Fixed
+- cachy-update's tray came back at the next login: the CachyOS package
+  starts it from `/etc/xdg/autostart/arch-update-tray.desktop`, which the
+  installer didn't handle. It is now switched off for the user with an XDG
+  override (`Hidden=true`), without touching the package's files.
+- The installer no longer tries to disable `arch-update-tray.service`, which
+  cachy-update doesn't have.
+
 ## [1.1.0] - 2026-11-25
 
 ### Added
@@ -64,6 +84,7 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - PyQt6 tray icon using cachy-update's icons.
 - `install.sh` with install, update, uninstall and status.
 
-[Unreleased]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v1.1.0...main
+[Unreleased]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v1.2.0...main
+[1.2.0]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v1.1.0...v1.2.0
 [1.1.0]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v1.0.0...v1.1.0
 [1.0.0]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/tags/v1.0.0

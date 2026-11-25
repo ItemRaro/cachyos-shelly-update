@@ -6,6 +6,8 @@
 #           validation of the .desktop files and systemd user units
 #   test  - smoke tests that run the real scripts without touching a system:
 #           tests/smoke.sh drives the updater against a fake `shelly` on PATH,
+#           tests/cachy_update_handoff.sh checks install.sh turning
+#           cachy-update off and back on,
 #           tests/tray_smoke.py builds the PyQt6 tray and its menu headless
 #
 # Runners: bash/data jobs on the shared shell runner (tags: docker,
@@ -57,7 +59,7 @@ shellcheck:
   script:
     - shellcheck --version
     # src/cachyos-shelly-update has no .sh extension, so list files explicitly
-    - shellcheck install.sh src/cachyos-shelly-update tests/smoke.sh
+    - shellcheck install.sh src/cachyos-shelly-update tests/smoke.sh tests/cachy_update_handoff.sh
 
 ruff:
   extends: .python
@@ -92,6 +94,7 @@ smoke:
   needs: [shellcheck]
   script:
     - bash tests/smoke.sh
+    - bash tests/cachy_update_handoff.sh
 
 tray:
   extends: .python

@@ -9,6 +9,27 @@ e o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-25
+
+### Alterado
+- A instalação desliga o cachy-update sem perguntar (duas bandejas e duas
+  verificações iam competir) e registra o que estava ligado: o timer dele,
+  do usuário ou de todos os usuários, a bandeja no login e a bandeja
+  rodando.
+- A remoção pergunta se é para religar o cachy-update quando ele estava
+  ligado antes da instalação, e restaura exatamente isso, inclusive o
+  `~/.config/autostart/arch-update-tray.desktop` do próprio usuário.
+- `install.sh status` mostra se o cachy-update foi desligado pelo
+  instalador.
+
+### Corrigido
+- A bandeja do cachy-update voltava no próximo login: o pacote do CachyOS a
+  inicia por `/etc/xdg/autostart/arch-update-tray.desktop`, que o instalador
+  não tratava. Agora ela é desligada para o usuário com um override XDG
+  (`Hidden=true`), sem mexer nos arquivos do pacote.
+- O instalador não tenta mais desativar o `arch-update-tray.service`, que o
+  cachy-update não tem.
+
 ## [1.1.0] - 2026-11-25
 
 ### Adicionado
@@ -66,6 +87,7 @@ e o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 - Ícone de bandeja em PyQt6 com os ícones do cachy-update.
 - `install.sh` com install, update, uninstall e status.
 
-[Unreleased]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v1.1.0...main
+[Unreleased]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v1.2.0...main
+[1.2.0]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v1.1.0...v1.2.0
 [1.1.0]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v1.0.0...v1.1.0
 [1.0.0]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/tags/v1.0.0
