@@ -1,7 +1,8 @@
 [Desktop Entry]
 Type=Application
 Name=CachyOS-Shelly-Update
-Comment=Atualizar sistema e aplicativos com o Shelly
+Comment=Update the system and apps with Shelly and AppMan
+Comment[pt_BR]=Atualizar o sistema e os aplicativos com o Shelly e o AppMan
 Exec=/usr/local/bin/cachyos-shelly-update --wait
 Icon=cachy-update_app-icon
 Terminal=true

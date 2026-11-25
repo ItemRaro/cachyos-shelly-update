@@ -1,5 +1,5 @@
 [Unit]
-Description=Verificação periódica do cachyos-shelly-update
+Description=Periodic cachyos-shelly-update check
 
 [Timer]
 OnStartupSec=2min

@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Ícone de bandeja do cachyos-shelly-update (no estilo do cachy-update).
+"""Tray icon for cachyos-shelly-update (in the style of cachy-update).
 
-Lê o estado gravado por `cachyos-shelly-update -c` em ~/.local/state/cachyos-shelly-update/
-e usa os mesmos ícones do cachy-update. Requer python-pyqt6.
+Reads the state written by `cachyos-shelly-update --check` in
+~/.local/state/cachyos-shelly-update/ and uses cachy-update's icons.
+Needs PyQt6, which install.sh puts in a private virtualenv.
 """
 
+import configparser
 import fcntl
 import os
 import shutil
@@ -18,61 +20,79 @@ from PyQt6.QtCore import QFileSystemWatcher, QTimer
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
-NAME = "cachyos-shelly-update"
-STATEDIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / NAME
-RUNDIR = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp"))
-ORIGENS = [("repo", "Repositórios"), ("aur", "AUR"), ("flatpak", "Flatpak"), ("appimage", "AppImage")]
-MAX_ITENS = 40  # itens por submenu
+APP_NAME = "cachyos-shelly-update"
+DISPLAY_NAME = "CachyOS-Shelly-Update"
+STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / APP_NAME
+RUN_DIR = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp"))
+CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+# (state file suffix, menu title), in display order
+SOURCES = [
+    ("repo", "Repositories"),
+    ("aur", "AUR"),
+    ("flatpak", "Flatpak"),
+    ("appimage", "AppImage"),
+    ("appman", "AppMan"),
+]
+MAX_ITEMS_PER_MENU = 40
+DEFAULT_ICON = "cachy-update-blue"
+DEFAULT_ICON_THEME = "breeze"
+STATE_POLL_INTERVAL_MS = 60_000
+STATE_DEBOUNCE_MS = 500
 
 
-def shelly_update_bin() -> str:
+def updaterBinary() -> str:
     return (os.environ.get("CACHYOS_SHELLY_UPDATE_BIN")
-            or shutil.which(NAME)
-            or f"/opt/{NAME}/bin/{NAME}")
+            or shutil.which(APP_NAME)
+            or f"/opt/{APP_NAME}/bin/{APP_NAME}")
 
 
-def ler_linhas(nome: str) -> list[str]:
+def readLines(fileName: str) -> list[str]:
+    """Non-empty lines of a state file ([] if it doesn't exist)."""
     try:
-        return [linha for linha in (STATEDIR / nome).read_text().splitlines() if linha.strip()]
+        return [line for line in (STATE_DIR / fileName).read_text().splitlines() if line.strip()]
     except OSError:
         return []
 
 
-def tempo_humano(segundos: float) -> str:
-    s = int(abs(segundos))
-    if s < 60:
-        return "menos de 1 min"
-    if s < 3600:
-        return f"{s // 60} min"
-    if s < 86400:
-        h, m = divmod(s // 60, 60)
-        return f"{h} h {m} min" if m else f"{h} h"
-    d, h = divmod(s // 3600, 24)
-    return f"{d} d {h} h" if h else f"{d} d"
+def humanDuration(seconds: float) -> str:
+    totalSeconds = int(abs(seconds))
+    if totalSeconds < 60:
+        return "less than 1 min"
+    if totalSeconds < 3600:
+        return f"{totalSeconds // 60} min"
+    if totalSeconds < 86400:
+        hours, minutes = divmod(totalSeconds // 60, 60)
+        return f"{hours} h {minutes} min" if minutes else f"{hours} h"
+    days, hours = divmod(totalSeconds // 3600, 24)
+    return f"{days} d {hours} h" if hours else f"{days} d"
 
 
-def proxima_verificacao() -> str | None:
-    """Lê do timer do systemd quando será a próxima verificação."""
+def updatesAvailableText(count: int) -> str:
+    return "1 update available" if count == 1 else f"{count} updates available"
+
+
+def timeUntilNextCheck() -> str | None:
+    """When the systemd timer runs the next check, or None if unknown."""
     try:
-        out = subprocess.run(
-            ["systemctl", "--user", "show", f"{NAME}.timer",
+        output = subprocess.run(
+            ["systemctl", "--user", "show", f"{APP_NAME}.timer",
              "-p", "NextElapseUSecRealtime", "--value"],
             capture_output=True, text=True, timeout=3,
         ).stdout.strip()
-        if not out or out == "n/a":
+        if not output or output == "n/a":
             return None
-        # Formato: "Thu 2026-11-26 10:23:11 -03" -> descarta o dia da semana e o fuso
-        partes = out.split()
-        quando = datetime.strptime(f"{partes[1]} {partes[2]}", "%Y-%m-%d %H:%M:%S")
-        return tempo_humano((quando - datetime.now()).total_seconds())
+        # Format: "Thu 2026-11-26 10:23:11 -03" -> drop the weekday and the zone
+        fields = output.split()
+        nextRun = datetime.strptime(f"{fields[1]} {fields[2]}", "%Y-%m-%d %H:%M:%S")
+        return humanDuration((nextRun - datetime.now()).total_seconds())
     except Exception:
         return None
 
 
-def comando_terminal(cmd: list[str]) -> list[str] | None:
-    """Monta o comando para abrir `cmd` num terminal (Konsole primeiro, por ser KDE)."""
-    preferido = os.environ.get("CACHYOS_SHELLY_UPDATE_TERMINAL")
-    opcoes = [
+def terminalCommand(command: list[str]) -> list[str] | None:
+    """Build the command that opens `command` in a terminal (Konsole first, KDE being the target)."""
+    preferredTerminal = os.environ.get("CACHYOS_SHELLY_UPDATE_TERMINAL")
+    terminals = [
         ("konsole", ["konsole", "-e"]),
         ("kitty", ["kitty"]),
         ("alacritty", ["alacritty", "-e"]),
@@ -82,160 +102,176 @@ def comando_terminal(cmd: list[str]) -> list[str] | None:
         ("gnome-terminal", ["gnome-terminal", "--"]),
         ("xterm", ["xterm", "-e"]),
     ]
-    if preferido:
-        opcoes.insert(0, (preferido, [preferido, "-e"]))
-    for exe, prefixo in opcoes:
-        if shutil.which(exe):
-            return prefixo + cmd
+    if preferredTerminal:
+        terminals.insert(0, (preferredTerminal, [preferredTerminal, "-e"]))
+    for executable, prefix in terminals:
+        if shutil.which(executable):
+            return prefix + command
     return None
 
 
-class Bandeja:
+def kdeIconTheme() -> str:
+    """The icon theme set in KDE (kdeglobals [Icons] Theme), or Breeze."""
+    config = configparser.ConfigParser(interpolation=None, strict=False)
+    try:
+        config.read(CONFIG_DIR / "kdeglobals")
+        return config.get("Icons", "Theme", fallback=DEFAULT_ICON_THEME) or DEFAULT_ICON_THEME
+    except configparser.Error:
+        return DEFAULT_ICON_THEME
+
+
+def applyIconTheme() -> None:
+    """PyQt6 from pip ships its own Qt, without KDE's platform theme plugin,
+    so it doesn't know the desktop's icon theme. Use KDE's when Qt has none."""
+    if QIcon.themeName() in ("", "hicolor"):
+        QIcon.setThemeName(kdeIconTheme())
+
+
+class TrayApp:
     def __init__(self, app: QApplication):
         self.app = app
         self.tray = QSystemTrayIcon()
         self.menu = QMenu()
-        self.menu.aboutToShow.connect(self.montar_menu)
+        self.menu.aboutToShow.connect(self.buildMenu)
         self.tray.setContextMenu(self.menu)
-        self.tray.activated.connect(self.ao_clicar)
-        self.verificando = False
+        self.tray.activated.connect(self.onActivated)
+        self.isChecking = False
+        self.checkProcessTimer: QTimer | None = None
 
-        STATEDIR.mkdir(parents=True, exist_ok=True)
-        # Observa a pasta de estado: o cachyos-shelly-update troca os arquivos com mv,
-        # então observar a pasta é mais confiável que observar cada arquivo
-        self.watcher = QFileSystemWatcher([str(STATEDIR)])
-        self.watcher.directoryChanged.connect(lambda _: self.agendar_atualizacao())
-        self.debounce = QTimer(singleShot=True, interval=500)
-        self.debounce.timeout.connect(self.atualizar)
-        # Rede de segurança caso algum evento se perca
-        self.poll = QTimer(interval=60_000)
-        self.poll.timeout.connect(self.atualizar)
-        self.poll.start()
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        # Watch the state directory: cachyos-shelly-update replaces the files
+        # with mv, so watching the directory is more reliable than each file
+        self.watcher = QFileSystemWatcher([str(STATE_DIR)])
+        self.watcher.directoryChanged.connect(lambda _: self.scheduleRefresh())
+        self.debounceTimer = QTimer(singleShot=True, interval=STATE_DEBOUNCE_MS)
+        self.debounceTimer.timeout.connect(self.refresh)
+        # Safety net in case a file system event is lost
+        self.pollTimer = QTimer(interval=STATE_POLL_INTERVAL_MS)
+        self.pollTimer.timeout.connect(self.refresh)
+        self.pollTimer.start()
 
-        self.atualizar()
+        self.refresh()
         self.tray.show()
 
-    # ---------- estado ----------
-    def agendar_atualizacao(self):
-        self.debounce.start()
+    # ---------- state ----------
+    def scheduleRefresh(self):
+        self.debounceTimer.start()
 
-    def nome_icone(self) -> str:
-        nomes = ler_linhas("tray_icon")
-        return nomes[0].strip() if nomes else "cachy-update-blue"
+    def iconName(self) -> str:
+        names = readLines("tray_icon")
+        return names[0].strip() if names else DEFAULT_ICON
 
-    def atualizar(self):
-        nome = self.nome_icone()
-        icone = QIcon.fromTheme(nome)
-        if icone.isNull():
-            # Fallback se o cachy-update não estiver instalado
-            tem = bool(ler_linhas("updates_all"))
-            icone = QIcon.fromTheme("update-high" if tem else "update-none",
-                                    QIcon.fromTheme("system-software-update"))
-        self.tray.setIcon(icone)
+    def refresh(self):
+        icon = QIcon.fromTheme(self.iconName())
+        if icon.isNull():
+            # Fallback when cachy-update's icons aren't installed
+            hasUpdates = bool(readLines("updates_all"))
+            icon = QIcon.fromTheme("update-high" if hasUpdates else "update-none",
+                                   QIcon.fromTheme("system-software-update"))
+        self.tray.setIcon(icon)
 
-        total = len(ler_linhas("updates_all"))
-        if self.verificando:
-            dica = "Verificando atualizações..."
-        elif total == 0:
-            dica = "Sistema em dia"
+        updateCount = len(readLines("updates_all"))
+        if self.isChecking:
+            statusText = "Checking for updates..."
+        elif updateCount == 0:
+            statusText = "System is up to date"
         else:
-            dica = f"{total} atualização disponível" if total == 1 else f"{total} atualizações disponíveis"
-        self.tray.setToolTip(f"CachyOS-Shelly-Update\n{dica}")
+            statusText = updatesAvailableText(updateCount)
+        self.tray.setToolTip(f"{DISPLAY_NAME}\n{statusText}")
 
     # ---------- menu ----------
-    def montar_menu(self):
-        m = self.menu
-        m.clear()
-        total = len(ler_linhas("updates_all"))
+    def buildMenu(self):
+        menu = self.menu
+        menu.clear()
+        updateCount = len(readLines("updates_all"))
 
-        if self.verificando:
-            a = m.addAction("Verificando atualizações...")
-            a.setEnabled(False)
-        elif total == 0:
-            a = m.addAction(QIcon.fromTheme("checkmark"), "Sistema em dia")
-            a.setEnabled(False)
+        if self.isChecking:
+            menu.addAction("Checking for updates...").setEnabled(False)
+        elif updateCount == 0:
+            menu.addAction(QIcon.fromTheme("checkmark"), "System is up to date").setEnabled(False)
         else:
-            txt = "1 atualização disponível" if total == 1 else f"{total} atualizações disponíveis"
-            m.addAction(QIcon.fromTheme("system-software-update"), txt).triggered.connect(self.executar)
-
-            for chave, rotulo in ORIGENS:
-                itens = ler_linhas(f"updates_{chave}")
-                if not itens:
+            menu.addAction(QIcon.fromTheme("system-software-update"),
+                           updatesAvailableText(updateCount)).triggered.connect(self.runUpdater)
+            for sourceKey, sourceTitle in SOURCES:
+                items = readLines(f"updates_{sourceKey}")
+                if not items:
                     continue
-                sub = m.addMenu(f"{rotulo} ({len(itens)})")
-                for item in itens[:MAX_ITENS]:
-                    sub.addAction(item).setEnabled(False)
-                if len(itens) > MAX_ITENS:
-                    sub.addAction(f"... e mais {len(itens) - MAX_ITENS}").setEnabled(False)
+                subMenu = menu.addMenu(f"{sourceTitle} ({len(items)})")
+                for item in items[:MAX_ITEMS_PER_MENU]:
+                    subMenu.addAction(item).setEnabled(False)
+                if len(items) > MAX_ITEMS_PER_MENU:
+                    subMenu.addAction(f"... and {len(items) - MAX_ITEMS_PER_MENU} more").setEnabled(False)
 
-        m.addSeparator()
-        ultima = ler_linhas("last_check")
-        if ultima:
+        menu.addSeparator()
+        lastCheck = readLines("last_check")
+        if lastCheck:
             try:
-                m.addAction(f"Última verificação há {tempo_humano(time.time() - int(ultima[0]))}").setEnabled(False)
+                elapsed = humanDuration(time.time() - int(lastCheck[0]))
+                menu.addAction(f"Last check {elapsed} ago").setEnabled(False)
             except ValueError:
                 pass
-        prox = proxima_verificacao()
-        if prox:
-            m.addAction(f"Próxima verificação em {prox}").setEnabled(False)
+        nextCheck = timeUntilNextCheck()
+        if nextCheck:
+            menu.addAction(f"Next check in {nextCheck}").setEnabled(False)
 
-        m.addSeparator()
-        m.addAction(QIcon.fromTheme("system-run"), "Executar CachyOS-Shelly-Update").triggered.connect(self.executar)
-        acao_check = m.addAction(QIcon.fromTheme("view-refresh"), "Verificar atualizações")
-        acao_check.setEnabled(not self.verificando)
-        acao_check.triggered.connect(self.verificar)
-        m.addAction(QIcon.fromTheme("application-exit"), "Sair").triggered.connect(self.app.quit)
+        menu.addSeparator()
+        menu.addAction(QIcon.fromTheme("system-run"), f"Run {DISPLAY_NAME}").triggered.connect(self.runUpdater)
+        checkAction = menu.addAction(QIcon.fromTheme("view-refresh"), "Check for updates")
+        checkAction.setEnabled(not self.isChecking)
+        checkAction.triggered.connect(self.runCheck)
+        menu.addAction(QIcon.fromTheme("application-exit"), "Quit").triggered.connect(self.app.quit)
 
-    # ---------- ações ----------
-    def ao_clicar(self, motivo):
-        if motivo == QSystemTrayIcon.ActivationReason.Trigger:
-            self.executar()
+    # ---------- actions ----------
+    def onActivated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            self.runUpdater()
 
-    def executar(self):
-        cmd = comando_terminal([shelly_update_bin(), "--wait"])
-        if cmd is None:
-            self.tray.showMessage("CachyOS-Shelly-Update", "Nenhum terminal encontrado. Defina CACHYOS_SHELLY_UPDATE_TERMINAL.")
+    def runUpdater(self):
+        command = terminalCommand([updaterBinary(), "--wait"])
+        if command is None:
+            self.tray.showMessage(DISPLAY_NAME, "No terminal found. Set CACHYOS_SHELLY_UPDATE_TERMINAL.")
             return
-        subprocess.Popen(cmd, start_new_session=True)
+        subprocess.Popen(command, start_new_session=True)
 
-    def verificar(self):
-        self.verificando = True
-        self.atualizar()
-        proc = subprocess.Popen([shelly_update_bin(), "--check"], start_new_session=True,
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        # Acompanha o fim do processo sem travar a interface
-        timer = QTimer(interval=1000)
+    def runCheck(self):
+        self.isChecking = True
+        self.refresh()
+        checkProcess = subprocess.Popen([updaterBinary(), "--check"], start_new_session=True,
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Follow the process without blocking the UI
+        processTimer = QTimer(interval=1000)
 
-        def checar():
-            if proc.poll() is not None:
-                timer.stop()
-                self.verificando = False
-                self.atualizar()
+        def onTick():
+            if checkProcess.poll() is not None:
+                processTimer.stop()
+                self.isChecking = False
+                self.refresh()
 
-        timer.timeout.connect(checar)
-        timer.start()
-        self._timer_check = timer  # mantém referência
+        processTimer.timeout.connect(onTick)
+        processTimer.start()
+        self.checkProcessTimer = processTimer  # keep a reference so it isn't collected
 
 
 def main():
-    # Só uma bandeja por vez
-    lock = open(RUNDIR / f"{NAME}-tray.lock", "w")
+    # Only one tray at a time; the lock lives as long as the process
+    lockFile = open(RUN_DIR / f"{APP_NAME}-tray.lock", "w")
     try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(lockFile, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
-        print("O ícone do cachyos-shelly-update já está rodando.", file=sys.stderr)
+        print(f"The {APP_NAME} tray icon is already running.", file=sys.stderr)
         sys.exit(1)
 
     app = QApplication(sys.argv)
-    app.setApplicationName("CachyOS-Shelly-Update")
-    app.setDesktopFileName(NAME)
+    app.setApplicationName(DISPLAY_NAME)
+    app.setDesktopFileName(APP_NAME)
     app.setQuitOnLastWindowClosed(False)
+    applyIconTheme()
 
     if not QSystemTrayIcon.isSystemTrayAvailable():
-        print("Bandeja do sistema não disponível.", file=sys.stderr)
+        print("System tray not available.", file=sys.stderr)
         sys.exit(1)
 
-    _bandeja = Bandeja(app)
+    _trayApp = TrayApp(app)
     sys.exit(app.exec())
 
 

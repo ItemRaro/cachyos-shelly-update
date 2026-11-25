@@ -1,7 +1,9 @@
 [Desktop Entry]
 Type=Application
-Name=CachyOS-Shelly-Update (bandeja)
-Comment=Ícone de atualizações do Shelly na bandeja
+Name=CachyOS-Shelly-Update (tray)
+Name[pt_BR]=CachyOS-Shelly-Update (bandeja)
+Comment=Tray icon for Shelly and AppMan updates
+Comment[pt_BR]=Ícone de atualizações do Shelly e do AppMan na bandeja
 Exec=sh -c "sleep 3 && /usr/local/bin/cachyos-shelly-update --tray"
 Icon=cachy-update_app-icon
 NoDisplay=true
