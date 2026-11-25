@@ -1,283 +1,412 @@
 #!/usr/bin/env bash
 #
-# cachyos-shelly-update — atualizador no estilo do arch-update/cachy-update,
-# usando o Shelly como backend (repositórios, AUR, Flatpak e AppImage).
+# cachyos-shelly-update - an arch-update/cachy-update style updater that uses
+# Shelly as the backend (repositories, AUR, Flatpak and AppImage) and also
+# updates the apps installed with AppMan.
 #
-# Uso:
-#   cachyos-shelly-update             lista as atualizações, pergunta e aplica
-#   cachyos-shelly-update -c          verifica em segundo plano (usado pelo timer):
-#                             grava o estado, atualiza o ícone da bandeja e notifica
-#   cachyos-shelly-update -l          só lista o que há para atualizar (sem atualizar)
-#   cachyos-shelly-update -y          atualiza sem perguntar (usa o -n do Shelly)
-#   cachyos-shelly-update --tray      inicia o ícone da bandeja
-#   cachyos-shelly-update --no-aur --no-flatpak --no-appimage --no-repo --no-devel
-#                             pula origens específicas
-#   cachyos-shelly-update --appman    também roda "appman -u" ao atualizar
-#   cachyos-shelly-update -V          versão
-#   cachyos-shelly-update -h          ajuda
+# Usage:
+#   cachyos-shelly-update             list the updates, ask, then apply them
+#   cachyos-shelly-update -c          background check (used by the timer):
+#                                     save the state, refresh the tray, notify
+#   cachyos-shelly-update -l          only list what can be updated
+#   cachyos-shelly-update -y          update without asking (uses Shelly's -n)
+#   cachyos-shelly-update --tray      start the tray icon
+#   cachyos-shelly-update --no-repo --no-aur --no-flatpak --no-appimage
+#                         --no-appman --no-devel
+#                                     skip specific sources
+#   cachyos-shelly-update -V          show the version
+#   cachyos-shelly-update -h          show this help
 #
-# Configuração opcional: ~/.config/cachyos-shelly-update/cachyos-shelly-update.conf
-#   (mesmas opções acima, uma por linha, ex.: --appman)
+# Optional config: ~/.config/cachyos-shelly-update/cachyos-shelly-update.conf
+#   (the same options as above, one per line, e.g. --no-devel)
 #
-# Atualizar/remover: /opt/cachyos-shelly-update/install.sh {update|uninstall}
+# Update/remove: /opt/cachyos-shelly-update/install.sh {update|uninstall}
 
 set -uo pipefail
 
-NAME=cachyos-shelly-update
-# Instalado em /opt/cachyos-shelly-update/bin (com link em /usr/local/bin): acha a própria pasta
-SELF="$(readlink -f "${BASH_SOURCE[0]}")"
-PREFIX="$(cd "$(dirname "$SELF")/.." && pwd)"
-LIBDIR="${CACHYOS_SHELLY_UPDATE_LIBDIR:-$PREFIX/lib}"
-STATEDIR="${XDG_STATE_HOME:-$HOME/.local/state}/$NAME"
-CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/$NAME/$NAME.conf"
-mkdir -p "$STATEDIR"
+# ---------- constants ----------
+readonly APP_NAME=cachyos-shelly-update
+readonly DISPLAY_NAME=CachyOS-Shelly-Update
+# Installed in /opt/cachyos-shelly-update/bin (linked from /usr/local/bin):
+# resolve our own location to find the rest of the installation
+SELF_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+PREFIX="$(cd "$(dirname "$SELF_PATH")/.." && pwd)"
+readonly SELF_PATH PREFIX
+readonly LIB_DIR="${CACHYOS_SHELLY_UPDATE_LIBDIR:-$PREFIX/lib}"
+readonly STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/$APP_NAME"
+readonly CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/$APP_NAME/$APP_NAME.conf"
+readonly APPMAN_CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/appman/appman-config"
+readonly ARCH_UPDATE_CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/arch-update/arch-update.conf"
+# Seconds allowed for checking a single AppMan app (it queries upstream)
+readonly APPMAN_PROBE_TIMEOUT="${CACHYOS_SHELLY_UPDATE_PROBE_TIMEOUT:-30}"
+# Every update source, in display order
+readonly SOURCES=(repo aur flatpak appimage appman)
+mkdir -p "$STATE_DIR"
 
-# ---------- cores ----------
+# ---------- output ----------
 if [[ -t 1 ]]; then
-    B=$'\e[1m'; G=$'\e[32m'; Y=$'\e[33m'; R=$'\e[31m'; C=$'\e[36m'; N=$'\e[0m'
+    readonly BOLD=$'\e[1m' GREEN=$'\e[32m' YELLOW=$'\e[33m' RED=$'\e[31m' CYAN=$'\e[36m' RESET=$'\e[0m'
 else
-    B=''; G=''; Y=''; R=''; C=''; N=''
+    readonly BOLD='' GREEN='' YELLOW='' RED='' CYAN='' RESET=''
 fi
-info()  { printf '%s==>%s %s%s%s\n' "$G" "$N" "$B" "$*" "$N"; }
-warn()  { printf '%s==> AVISO:%s %s\n' "$Y" "$N" "$*"; }
-erro()  { printf '%s==> ERRO:%s %s\n' "$R" "$N" "$*" >&2; }
-titulo(){ printf '\n%s:: %s%s\n' "$C$B" "$*" "$N"; }
+printInfo()    { printf '%s==>%s %s%s%s\n' "$GREEN" "$RESET" "$BOLD" "$*" "$RESET"; }
+printWarning() { printf '%s==> WARNING:%s %s\n' "$YELLOW" "$RESET" "$*"; }
+printError()   { printf '%s==> ERROR:%s %s\n' "$RED" "$RESET" "$*" >&2; }
+printTitle()   { printf '\n%s:: %s%s\n' "$CYAN$BOLD" "$*" "$RESET"; }
 
-# ---------- opções ----------
-MODO=update            # update | check | list | tray
-SEM_CONFIRMAR=0
-USAR_APPMAN=0
-SEM_DEVEL=0
-AGUARDAR=0             # --wait: segura o terminal aberto no final (usado pela bandeja)
-declare -A ATIVO=([repo]=1 [aur]=1 [flatpak]=1 [appimage]=1)
+# ---------- options ----------
+mode=update            # update | check | list | tray
+assumeYes=0
+skipDevel=0
+waitAtExit=0           # --wait: keep the terminal open at the end (used by the tray)
+declare -A enabledSources=([repo]=1 [aur]=1 [flatpak]=1 [appimage]=1 [appman]=1)
 
-ajuda() { sed -n '3,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
+# Print the comment block at the top of this file, without the leading "# "
+showHelp() {
+    awk 'NR > 2 && !/^#/ { exit } NR > 2 { sub(/^# ?/, ""); print }' "$SELF_PATH"
+    exit 0
+}
 
-parse_opt() {
+parseOption() {
     case "$1" in
-        -c|--check)    MODO=check ;;
-        -l|--list)     MODO=list ;;
-        --tray)        MODO=tray ;;
-        -y|--yes)      SEM_CONFIRMAR=1 ;;
-        --no-repo)     ATIVO[repo]=0 ;;
-        --no-aur)      ATIVO[aur]=0 ;;
-        --no-flatpak)  ATIVO[flatpak]=0 ;;
-        --no-appimage) ATIVO[appimage]=0 ;;
-        --no-devel)    SEM_DEVEL=1 ;;
-        --appman)      USAR_APPMAN=1 ;;
-        --wait)        AGUARDAR=1 ;;
-        -V|--version)  echo "$NAME $(cat "$PREFIX/VERSION" 2>/dev/null || echo dev)"; exit 0 ;;
-        -h|--help)     ajuda ;;
-        *) erro "Opção desconhecida: $1"; exit 1 ;;
+        -c|--check)    mode=check ;;
+        -l|--list)     mode=list ;;
+        --tray)        mode=tray ;;
+        -y|--yes)      assumeYes=1 ;;
+        --no-repo)     enabledSources[repo]=0 ;;
+        --no-aur)      enabledSources[aur]=0 ;;
+        --no-flatpak)  enabledSources[flatpak]=0 ;;
+        --no-appimage) enabledSources[appimage]=0 ;;
+        --no-appman)   enabledSources[appman]=0 ;;
+        --appman)      enabledSources[appman]=1 ;;   # 1.0 compatibility: now the default
+        --no-devel)    skipDevel=1 ;;
+        --wait)        waitAtExit=1 ;;
+        -V|--version)  echo "$APP_NAME $(cat "$PREFIX/VERSION" 2>/dev/null || echo dev)"; exit 0 ;;
+        -h|--help)     showHelp ;;
+        *) printError "Unknown option: $1"; exit 1 ;;
     esac
 }
 
-# Config primeiro, linha de comando depois
-if [[ -f $CONFIG ]]; then
-    while read -r linha; do
-        linha="${linha%%#*}"; linha="${linha//[[:space:]]/}"
-        [[ -n $linha ]] && parse_opt "$linha"
-    done < "$CONFIG"
+# The config file first, then the command line (so it can override it)
+if [[ -f $CONFIG_FILE ]]; then
+    while read -r configLine; do
+        configLine="${configLine%%#*}"
+        configLine="${configLine//[[:space:]]/}"
+        [[ -n $configLine ]] && parseOption "$configLine"
+    done < "$CONFIG_FILE"
 fi
-while (($#)); do parse_opt "$1"; shift; done
+while (($#)); do parseOption "$1"; shift; done
 
-fim() {
-    if ((AGUARDAR)); then
-        echo; read -rp "Pressione Enter para fechar..." _
+finish() {
+    if ((waitAtExit)); then
+        echo
+        read -rp "Press Enter to close..." _
     fi
     exit "$1"
 }
 
-# ---------- bandeja ----------
-if [[ $MODO == tray ]]; then
-    CACHYOS_SHELLY_UPDATE_BIN="$SELF" exec python3 "$LIBDIR/cachyos-shelly-update-tray.py"
+# ---------- tray ----------
+if [[ $mode == tray ]]; then
+    # The installer puts PyQt6 in a private virtualenv; fall back to the
+    # system Python when running straight from the repository
+    trayPython="$PREFIX/.venv/bin/python"
+    [[ -x $trayPython ]] || trayPython=python3
+    CACHYOS_SHELLY_UPDATE_BIN="$SELF_PATH" exec "$trayPython" "$LIB_DIR/$APP_NAME-tray.py"
 fi
 
-command -v shelly >/dev/null 2>&1 || { erro "shelly não encontrado (sudo pacman -S shelly)"; fim 1; }
-if ((USAR_APPMAN)) && ! command -v appman >/dev/null 2>&1; then
-    warn "appman não instalado; ignorando --appman."; USAR_APPMAN=0
+command -v shelly >/dev/null 2>&1 || { printError "shelly not found (sudo pacman -S shelly)"; finish 1; }
+
+# ---------- AppMan ----------
+# AppMan installs itself as a script in ~/.local/bin, which may not be in PATH
+findAppman() {
+    local candidate
+    for candidate in "$(command -v appman 2>/dev/null)" "${XDG_BIN_HOME:-$HOME/.local/bin}/appman"; do
+        if [[ -n $candidate && -x $candidate ]]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Where AppMan keeps its apps (relative paths are relative to $HOME).
+# No config file means AppMan was never set up, so there is nothing to update.
+appmanAppsDir() {
+    local appsDir
+    [[ -f $APPMAN_CONFIG_FILE ]] || return 1
+    appsDir="$(head -n 1 "$APPMAN_CONFIG_FILE")"
+    [[ -n $appsDir ]] || return 1
+    [[ $appsDir == /* ]] || appsDir="$HOME/$appsDir"
+    [[ -d $appsDir ]] || return 1
+    echo "$appsDir"
+}
+
+appmanBin="$(findAppman)" || appmanBin=""
+if ((enabledSources[appman])) && { [[ -z $appmanBin ]] || ! appmanAppsDir >/dev/null; }; then
+    enabledSources[appman]=0
 fi
 
-# Impede duas execuções ao mesmo tempo (verificação e atualização)
-exec 9>"${XDG_RUNTIME_DIR:-/tmp}/$NAME.lock"
+# ---------- single instance ----------
+# Prevents two runs at the same time (check and update)
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/$APP_NAME.lock"
 if ! flock -n 9; then
-    [[ $MODO == check ]] && exit 0      # o timer simplesmente pula esta rodada
-    erro "Outra instância do $NAME já está rodando."; fim 1
+    [[ $mode == check ]] && exit 0      # the timer just skips this round
+    printError "Another $APP_NAME instance is already running."
+    finish 1
 fi
 
-# ---------- verificação ----------
-# Limpa a saída do Shelly: tira cores, linhas vazias e mensagens de "nada a fazer"
-limpar() {
+# ---------- checking ----------
+# Clean Shelly's output: drop colors, blank lines and "nothing to do" messages
+stripShellyNoise() {
     sed -r 's/\x1B\[[0-9;]*[A-Za-z]//g; s/^[[:space:]]+//' \
     | grep -vE '^$|[Nn]o (updates|packages)|[Uu]p.to.date|[Nn]othing|^(::|==>|Checking|Fetching|Synchroniz)'
 }
 
-checar_repo() {
+checkRepo() {
     if command -v checkupdates >/dev/null 2>&1; then
-        # Igual ao arch-update: banco temporário, sem root e sem mexer no do sistema
-        local tmp; tmp="$(mktemp -d "${TMPDIR:-/tmp}/$NAME-db.XXXXX")"
-        CHECKUPDATES_DB="$tmp" checkupdates 2>/dev/null
-        rm -rf "$tmp"
+        # Like arch-update: a temporary database, no root, the system one untouched
+        local tempDb
+        tempDb="$(mktemp -d "${TMPDIR:-/tmp}/$APP_NAME-db.XXXXX")"
+        CHECKUPDATES_DB="$tempDb" checkupdates 2>/dev/null
+        rm -rf "$tempDb"
     else
-        LC_ALL=C shelly list-updates standard 2>/dev/null | limpar
+        LC_ALL=C shelly list-updates standard 2>/dev/null | stripShellyNoise
     fi
 }
-checar_aur() {
-    local a=(list-updates aur); ((SEM_DEVEL)) && a+=(--no-devel)
-    LC_ALL=C shelly "${a[@]}" 2>/dev/null | limpar
+
+checkAur() {
+    local shellyArgs=(list-updates aur)
+    ((skipDevel)) && shellyArgs+=(--no-devel)
+    LC_ALL=C shelly "${shellyArgs[@]}" 2>/dev/null | stripShellyNoise
 }
-checar_flatpak() {
+
+checkFlatpak() {
     if command -v flatpak >/dev/null 2>&1; then
         flatpak update --appstream >/dev/null 2>&1
         flatpak remote-ls --updates --columns=name,version 2>/dev/null | tr -s '\t' ' '
     fi
 }
-checar_appimage() {
-    LC_ALL=C shelly list-updates appimage 2>/dev/null | limpar
+
+checkAppimage() {
+    LC_ALL=C shelly list-updates appimage 2>/dev/null | stripShellyNoise
 }
 
-# Grava um arquivo por origem em $STATEDIR/updates_<origem> e tudo junto em updates_all
-verificar() {
-    local b
-    for b in repo aur flatpak appimage; do
-        if ((ATIVO[$b])); then
-            case $b in
-                repo)     checar_repo ;;
-                aur)      checar_aur ;;
-                flatpak)  checar_flatpak ;;
-                appimage) checar_appimage ;;
-            esac > "$STATEDIR/updates_$b.tmp"
-            mv -f "$STATEDIR/updates_$b.tmp" "$STATEDIR/updates_$b"
-        else
-            : > "$STATEDIR/updates_$b"
-        fi
-    done
-    cat "$STATEDIR"/updates_{repo,aur,flatpak,appimage} > "$STATEDIR/updates_all.tmp"
-    mv -f "$STATEDIR/updates_all.tmp" "$STATEDIR/updates_all"
-    date +%s > "$STATEDIR/last_check"
+# AppMan has no "check only" command: "appman -u" runs each app's AM-updater,
+# which downloads right away. AM-updater scripts are generated from AppMan's
+# templates and all start the same way: they set version0 (installed) and
+# version (upstream) and only then decide whether to download. buildAppmanProbe
+# keeps just that first part and prints both values, so nothing is downloaded.
+# Scripts that don't follow the template are skipped (exit status 1).
+buildAppmanProbe() {
+    awk '
+        /^\[ -n "\$version" \]/ || /^if / { stop = 1 }
+        stop { next }
+        /^version0=/ { hasInstalled = 1 }
+        # Also indented or after ")" when set inside a "case $SITE" block
+        # (the multi-source templates of AppMan)
+        /(^|[ \t)])version=/ { hasLatest = 1 }
+        { print }
+        END {
+            if (!hasInstalled || !hasLatest) exit 1
+            print "printf \"%s\\n%s\\n\" \"$version0\" \"$version\""
+        }
+    ' "$1"
 }
 
-# Mesmo ícone e estilo do cachy-update (lê TrayIconStyle/ColorblindMode do arch-update.conf)
-icone_atual() {
-    local conf="${XDG_CONFIG_HOME:-$HOME/.config}/arch-update/arch-update.conf" estilo cb=""
-    estilo=$(grep -hE '^\s*TrayIconStyle\s*=' "$conf" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]')
-    [[ $estilo =~ ^(blue|light|dark)$ ]] || estilo=blue
-    grep -qE '^\s*ColorblindMode\s*$' "$conf" 2>/dev/null && cb="-cb"
-    if [[ -s $STATEDIR/updates_all ]]; then
-        echo "cachy-update_updates-available-$estilo$cb"
+# A version is often a download URL: show the version number in its file name
+shortVersion() {
+    local fileName="${1##*/}"
+    fileName="${fileName%%\?*}"
+    if [[ $fileName =~ [0-9]+(\.[0-9]+)+ ]]; then
+        echo "${BASH_REMATCH[0]}"
     else
-        echo "cachy-update-$estilo"
+        echo "${fileName:-?}"
     fi
 }
 
-notificar_se_mudou() {
-    local total txt
-    total=$(grep -c . "$STATEDIR/updates_all")
-    if ((total > 0)) && ! cmp -s "$STATEDIR/updates_all" "$STATEDIR/notified" 2>/dev/null; then
-        if command -v notify-send >/dev/null 2>&1; then
-            txt="$total atualização disponível"; ((total > 1)) && txt="$total atualizações disponíveis"
-            notify-send -a "CachyOS-Shelly-Update" -i "$(icone_atual)" "CachyOS-Shelly-Update" "$txt" 2>/dev/null
-        fi
-    fi
-    cp -f "$STATEDIR/updates_all" "$STATEDIR/notified"
+checkAppman() {
+    local appsDir updaterFile appDir probeScript probeOutput installedVersion latestVersion
+    appsDir="$(appmanAppsDir)" || return 0
+    for updaterFile in "$appsDir"/*/AM-updater; do
+        [[ -f $updaterFile ]] || continue
+        appDir="${updaterFile%/AM-updater}"
+        probeScript="$(buildAppmanProbe "$updaterFile")" || continue
+        # 9>&-: don't hand the single-instance lock to the probe. If it times out,
+        # whatever it was waiting on (a stuck curl) can outlive it and would
+        # keep the lock, blocking every later check and update.
+        probeOutput="$(cd "$appDir" && timeout "$APPMAN_PROBE_TIMEOUT" sh -c "$probeScript" 2>/dev/null 9>&-)" || continue
+        { read -r installedVersion; read -r latestVersion; } <<<"$probeOutput"
+        [[ -n $latestVersion && $latestVersion != "$installedVersion" ]] || continue
+        printf '%s %s -> %s\n' "${appDir##*/}" "$(shortVersion "$installedVersion")" "$(shortVersion "$latestVersion")"
+    done
 }
 
-mostrar_lista() {
-    local -A NOME=([repo]="Repositórios" [aur]="AUR" [flatpak]="Flatpak" [appimage]="AppImage")
-    local b
-    for b in repo aur flatpak appimage; do
-        ((ATIVO[$b])) || continue
-        titulo "${NOME[$b]}"
-        if [[ -s $STATEDIR/updates_$b ]]; then
-            sed 's/^/   /' "$STATEDIR/updates_$b"
+# Write one file per source to $STATE_DIR/updates_<source>, and all of them
+# together to updates_all. Files are replaced with mv so the tray never
+# reads a half-written file.
+refreshState() {
+    local source
+    for source in "${SOURCES[@]}"; do
+        if ((enabledSources[$source])); then
+            case $source in
+                repo)     checkRepo ;;
+                aur)      checkAur ;;
+                flatpak)  checkFlatpak ;;
+                appimage) checkAppimage ;;
+                appman)   checkAppman ;;
+            esac > "$STATE_DIR/updates_$source.tmp"
+            mv -f "$STATE_DIR/updates_$source.tmp" "$STATE_DIR/updates_$source"
         else
-            echo "   nenhuma atualização"
+            : > "$STATE_DIR/updates_$source"
         fi
     done
-    ((USAR_APPMAN)) && { titulo "AppMan"; echo "   verificado durante a atualização (appman -u)"; }
+    cat "${SOURCES[@]/#/$STATE_DIR/updates_}" > "$STATE_DIR/updates_all.tmp"
+    mv -f "$STATE_DIR/updates_all.tmp" "$STATE_DIR/updates_all"
+    date +%s > "$STATE_DIR/last_check"
+}
+
+# Same icons and style as cachy-update (reads TrayIconStyle/ColorblindMode
+# from arch-update.conf)
+currentTrayIcon() {
+    local iconStyle colorblindSuffix=""
+    iconStyle=$(grep -hE '^\s*TrayIconStyle\s*=' "$ARCH_UPDATE_CONFIG_FILE" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]')
+    [[ $iconStyle =~ ^(blue|light|dark)$ ]] || iconStyle=blue
+    grep -qE '^\s*ColorblindMode\s*$' "$ARCH_UPDATE_CONFIG_FILE" 2>/dev/null && colorblindSuffix="-cb"
+    if [[ -s $STATE_DIR/updates_all ]]; then
+        echo "cachy-update_updates-available-$iconStyle$colorblindSuffix"
+    else
+        echo "cachy-update-$iconStyle"
+    fi
+}
+
+# "1 update available" / "N updates available"
+updatesAvailableText() {
+    if (($1 == 1)); then echo "1 update available"; else echo "$1 updates available"; fi
+}
+
+# Number of non-empty lines in the state files of the given sources
+countUpdates() {
+    local source lineCount total=0
+    for source in "$@"; do
+        lineCount=$(grep -c . "$STATE_DIR/updates_$source" 2>/dev/null) || true
+        total=$((total + ${lineCount:-0}))
+    done
+    echo "$total"
+}
+
+notifyIfChanged() {
+    local updateCount
+    updateCount=$(countUpdates all)
+    if ((updateCount > 0)) && ! cmp -s "$STATE_DIR/updates_all" "$STATE_DIR/notified" 2>/dev/null; then
+        if command -v notify-send >/dev/null 2>&1; then
+            notify-send -a "$DISPLAY_NAME" -i "$(currentTrayIcon)" "$DISPLAY_NAME" \
+                "$(updatesAvailableText "$updateCount")" 2>/dev/null
+        fi
+    fi
+    cp -f "$STATE_DIR/updates_all" "$STATE_DIR/notified"
+}
+
+showUpdateList() {
+    local -A sourceTitles=([repo]="Repositories" [aur]="AUR" [flatpak]="Flatpak" [appimage]="AppImage" [appman]="AppMan")
+    local source
+    for source in "${SOURCES[@]}"; do
+        ((enabledSources[$source])) || continue
+        printTitle "${sourceTitles[$source]}"
+        if [[ -s $STATE_DIR/updates_$source ]]; then
+            sed 's/^/   /' "$STATE_DIR/updates_$source"
+        else
+            echo "   no updates"
+        fi
+    done
     echo
 }
 
-atualizar_estado() {
-    verificar
-    icone_atual > "$STATEDIR/tray_icon"
+updateState() {
+    refreshState
+    currentTrayIcon > "$STATE_DIR/tray_icon"
 }
 
-# ---------- modo check (timer) ----------
-if [[ $MODO == check ]]; then
-    atualizar_estado
-    notificar_se_mudou
+# ---------- check mode (timer) ----------
+if [[ $mode == check ]]; then
+    updateState
+    notifyIfChanged
     exit 0
 fi
 
-# ---------- modo list / update ----------
-info "Verificando atualizações..."
-atualizar_estado
-cp -f "$STATEDIR/updates_all" "$STATEDIR/notified"
-mostrar_lista
+# ---------- list / update modes ----------
+printInfo "Checking for updates..."
+updateState
+cp -f "$STATE_DIR/updates_all" "$STATE_DIR/notified"
+showUpdateList
 
-TOTAL=$(grep -c . "$STATEDIR/updates_all")
-if ((TOTAL == 0)) && ((USAR_APPMAN == 0)); then
-    info "Sistema atualizado. Nada a fazer."
-    fim 0
+shellyUpdateCount=$(countUpdates repo aur flatpak appimage)
+appmanUpdateCount=$(countUpdates appman)
+totalUpdateCount=$((shellyUpdateCount + appmanUpdateCount))
+if ((totalUpdateCount == 0)); then
+    printInfo "System is up to date. Nothing to do."
+    finish 0
 fi
-((TOTAL > 0)) && info "Atualizações disponíveis: $TOTAL"
-[[ $MODO == list ]] && fim 0
+printInfo "Available updates: $totalUpdateCount"
+[[ $mode == list ]] && finish 0
 
-if ((! SEM_CONFIRMAR)); then
-    read -rp "$(printf '%s::%s Prosseguir com a atualização? [S/n] ' "$C$B" "$N")" resp
-    case "${resp,,}" in
-        ""|s|sim|y|yes) ;;
-        *) info "Cancelado."; fim 0 ;;
+if ((!assumeYes)); then
+    read -rp "$(printf '%s::%s Proceed with the update? [Y/n] ' "$CYAN$BOLD" "$RESET")" answer
+    case "${answer,,}" in
+        ""|y|yes) ;;
+        *) printInfo "Cancelled."; finish 0 ;;
     esac
 fi
 
-# ---------- atualizar ----------
-upgrade_args=(-n upgrade all)          # -n: já confirmamos acima
-((ATIVO[repo]))     || upgrade_args+=(--no-repo)
-((ATIVO[aur]))      || upgrade_args+=(--no-aur)
-((ATIVO[flatpak]))  || upgrade_args+=(--no-flatpak)
-((ATIVO[appimage])) || upgrade_args+=(--no-appimage)
-((SEM_DEVEL))       && upgrade_args+=(--no-devel)
+# ---------- update ----------
+upgradeArgs=(-n upgrade all)          # -n: we already asked above
+((enabledSources[repo]))     || upgradeArgs+=(--no-repo)
+((enabledSources[aur]))      || upgradeArgs+=(--no-aur)
+((enabledSources[flatpak]))  || upgradeArgs+=(--no-flatpak)
+((enabledSources[appimage])) || upgradeArgs+=(--no-appimage)
+((skipDevel))                && upgradeArgs+=(--no-devel)
 
-STATUS=0
-if ((TOTAL > 0)); then
-    titulo "Atualizando com o Shelly"
-    shelly "${upgrade_args[@]}" || { STATUS=1; erro "O Shelly informou falha em pelo menos um backend."; }
+exitStatus=0
+if ((shellyUpdateCount > 0)); then
+    printTitle "Updating with Shelly"
+    shelly "${upgradeArgs[@]}" || { exitStatus=1; printError "Shelly reported a failure in at least one backend."; }
 fi
-if ((USAR_APPMAN)); then
-    titulo "Atualizando AppImages do AppMan"
-    appman -u || { STATUS=1; erro "Falha no appman -u."; }
+if ((appmanUpdateCount > 0)); then
+    printTitle "Updating AppMan apps"
+    "$appmanBin" -u || { exitStatus=1; printError "appman -u failed."; }
 fi
 
-# ---------- pós-atualização (como o arch-update) ----------
-if ((ATIVO[repo] || ATIVO[aur])); then
+# ---------- after the update (like arch-update) ----------
+if ((enabledSources[repo] || enabledSources[aur])); then
     if command -v pacdiff >/dev/null 2>&1; then
-        pac="$(pacdiff -o 2>/dev/null)"
-        if [[ -n $pac ]]; then
-            titulo "Arquivos .pacnew/.pacsave pendentes"
-            printf '%s\n' "$pac" | sed 's/^/   /'
-            echo "   Revise com: sudo pacdiff -s"
+        pacnewFiles="$(pacdiff -o 2>/dev/null)"
+        if [[ -n $pacnewFiles ]]; then
+            printTitle "Pending .pacnew/.pacsave files"
+            printf '%s\n' "$pacnewFiles" | sed 's/^/   /'
+            echo "   Review them with: sudo pacdiff -s"
         fi
     fi
-    orf="$(pacman -Qtdq 2>/dev/null)"
-    if [[ -n $orf ]]; then
-        titulo "Pacotes órfãos"
-        printf '%s\n' "$orf" | sed 's/^/   /'
-        echo "   Remova com: sudo pacman -Rns \$(pacman -Qtdq)"
+    orphanPackages="$(pacman -Qtdq 2>/dev/null)"
+    if [[ -n $orphanPackages ]]; then
+        printTitle "Orphan packages"
+        printf '%s\n' "$orphanPackages" | sed 's/^/   /'
+        echo "   Remove them with: sudo pacman -Rns \$(pacman -Qtdq)"
     fi
     if [[ ! -d /usr/lib/modules/$(uname -r) ]]; then
-        titulo "Reinicialização recomendada"
-        echo "   O kernel em execução ($(uname -r)) foi substituído."
+        printTitle "Reboot recommended"
+        echo "   The running kernel ($(uname -r)) has been replaced."
     fi
 fi
 
-# Verifica de novo para a bandeja voltar ao ícone "em dia"
+# Check again so the tray goes back to the "up to date" icon
 echo
-info "Atualizando o estado da bandeja..."
-atualizar_estado
-cp -f "$STATEDIR/updates_all" "$STATEDIR/notified"
+printInfo "Refreshing the tray state..."
+updateState
+cp -f "$STATE_DIR/updates_all" "$STATE_DIR/notified"
 
 echo
-if ((STATUS == 0)); then info "Atualização concluída."; else warn "Concluída com erros. Veja as mensagens acima."; fi
-fim "$STATUS"
+if ((exitStatus == 0)); then
+    printInfo "Update finished."
+else
+    printWarning "Finished with errors. See the messages above."
+fi
+finish "$exitStatus"

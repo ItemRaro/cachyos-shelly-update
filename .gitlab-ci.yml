@@ -12,6 +12,9 @@
 # shellscript), Python jobs on the shared Python runner (docker, python).
 # Images must be on each runner's allowed_images list.
 #
+# PyQt6 comes from requirements.txt, the same pin install.sh puts in the
+# tray's virtualenv.
+#
 # python:3.14-trixie: CachyOS ships Python 3.14, and the PyQt6 wheels need
 # glibc >= 2.34 (x86_64) / 2.39 (aarch64), which bookworm (2.36) only half
 # covers. --only-binary makes a missing wheel fail fast instead of trying a
@@ -23,7 +26,6 @@ variables:
   PIP_ROOT_USER_ACTION: ignore
   # Pinned so a new release can't turn the pipeline red on its own; bump on purpose.
   RUFF_VERSION: '0.16.10'
-  PYQT6_VERSION: '6.12.1'
   PYTHON_IMAGE: python:3.14-trixie
   SHELLCHECK_IMAGE: koalaman/shellcheck-alpine:v0.10.0
 
@@ -102,6 +104,6 @@ tray:
     - >-
       apt-get install -y -qq --no-install-recommends
       libgl1 libegl1 libxkbcommon0 libfontconfig1 libdbus-1-3 libglib2.0-0t64 >/dev/null
-    - 'pip install --quiet --only-binary=:all: "PyQt6==$PYQT6_VERSION"'
+    - 'pip install --quiet --only-binary=:all: -r requirements.txt'
     - python --version
     - python tests/tray_smoke.py

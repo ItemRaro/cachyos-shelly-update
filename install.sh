@@ -1,336 +1,523 @@
 #!/usr/bin/env bash
 #
-# Instalador do cachyos-shelly-update
+# cachyos-shelly-update installer
 #
-#   ./install.sh install     instala em /opt/cachyos-shelly-update (e as dependências)
-#   ./install.sh update      atualiza a partir do repositório git
-#   ./install.sh uninstall   remove (use --purge para apagar também o estado/config do usuário)
-#   ./install.sh status      mostra o que está instalado
+#   ./install.sh install     install into /opt/cachyos-shelly-update (plus dependencies)
+#   ./install.sh update      update from the git repository
+#   ./install.sh uninstall   remove it (see --purge)
+#   ./install.sh status      show what is installed
 #
-# Opções:  -y | --yes   não pergunta nada (pacman/yay com --noconfirm)
-#          --purge      (uninstall) apaga ~/.local/state e ~/.config do cachyos-shelly-update
+# Options:  -y | --yes   don't ask anything (pacman/yay get --noconfirm)
+#           --purge      (uninstall) also delete the user's state and config, and
+#                        offer to remove the packages and AppMan this installer added
 #
-# Rode como seu usuário normal: o script pede o sudo quando precisa.
-# (O yay não pode rodar como root.)
+# Run it as your normal user: it asks for sudo when needed.
+# (yay and AppMan refuse to run as root.)
 #
-# Depois de instalado, este script fica em /opt/cachyos-shelly-update/install.sh,
-# então o repositório pode ser apagado: update e uninstall funcionam de lá.
+# Once installed, this script lives in /opt/cachyos-shelly-update/install.sh,
+# so the repository can be deleted: update and uninstall work from there.
 
 set -euo pipefail
 
-NAME=cachyos-shelly-update
-PREFIX=/opt/$NAME
-BINLINK=/usr/local/bin/$NAME
-APPDIR=/usr/local/share/applications
-AUTOSTART=/etc/xdg/autostart
-UNITDIR=/etc/systemd/user
-SRC="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# ---------- constants ----------
+readonly APP_NAME=cachyos-shelly-update
+readonly PREFIX=/opt/$APP_NAME
+readonly BIN_LINK=/usr/local/bin/$APP_NAME
+readonly APPLICATIONS_DIR=/usr/local/share/applications
+readonly AUTOSTART_DIR=/etc/xdg/autostart
+readonly USER_UNIT_DIR=/etc/systemd/user
+readonly PACMAN_HOOK=/etc/pacman.d/hooks/$APP_NAME-venv.hook
+# The tray's Python dependencies (PyQt6) live here, not in the system
+readonly VENV_DIR=$PREFIX/.venv
+# Packages this installer added, so --purge can offer to remove them
+readonly INSTALLED_PACKAGES_FILE=$PREFIX/installed-packages
+# Set when this installer downloaded AppMan (holds its path)
+readonly INSTALLED_APPMAN_FILE=$PREFIX/installed-appman
+readonly APPMAN_URL=https://raw.githubusercontent.com/ivan-hc/AM/main/APP-MANAGER
+SOURCE_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+readonly SOURCE_DIR
 
-# Dependência -> nome no repositório | nome no AUR (para o yay)
-# O "pacman -T" também aceita pacotes que fornecem a dependência (ex.: shelly-bin)
-DEPS=(
-    "shelly|shelly|shelly-bin"
-    "shelly-flatpak-backend|shelly-flatpak-backend|shelly-flatpak-backend-bin"
-    "flatpak|flatpak|"
-    "python-pyqt6|python-pyqt6|"
-    "pacman-contrib|pacman-contrib|"
-    "libnotify|libnotify|"
+# dependency | repository package | AUR package (for yay) | required or optional
+# "pacman -T" also accepts packages that provide the dependency (e.g. shelly-bin).
+# The optional ones are tools AppMan uses to unpack apps; without them it
+# stops to ask whether to download static copies.
+readonly DEPENDENCIES=(
+    "shelly|shelly|shelly-bin|required"
+    "shelly-flatpak-backend|shelly-flatpak-backend|shelly-flatpak-backend-bin|required"
+    "flatpak|flatpak||required"
+    "python|python||required"
+    "pacman-contrib|pacman-contrib||required"
+    "libnotify|libnotify||required"
+    "curl|curl||required"
+    "wget|wget||optional"
+    "unzip|unzip||optional"
+    "7zip|7zip||optional"
+    "binutils|binutils||optional"
+    "file|file||optional"
+    "xz|xz||optional"
 )
 
-# ---------- saída ----------
+# ---------- output ----------
 if [[ -t 1 ]]; then
-    B=$'\e[1m'; G=$'\e[32m'; Y=$'\e[33m'; R=$'\e[31m'; C=$'\e[36m'; N=$'\e[0m'
+    readonly BOLD=$'\e[1m' GREEN=$'\e[32m' YELLOW=$'\e[33m' RED=$'\e[31m' CYAN=$'\e[36m' RESET=$'\e[0m'
 else
-    B=''; G=''; Y=''; R=''; C=''; N=''
+    readonly BOLD='' GREEN='' YELLOW='' RED='' CYAN='' RESET=''
 fi
-info()  { printf '%s==>%s %s%s%s\n' "$G" "$N" "$B" "$*" "$N"; }
-passo() { printf '%s  ->%s %s\n' "$C" "$N" "$*"; }
-warn()  { printf '%s==> AVISO:%s %s\n' "$Y" "$N" "$*"; }
-morre() { printf '%s==> ERRO:%s %s\n' "$R" "$N" "$*" >&2; exit 1; }
+printInfo()    { printf '%s==>%s %s%s%s\n' "$GREEN" "$RESET" "$BOLD" "$*" "$RESET"; }
+printStep()    { printf '%s  ->%s %s\n' "$CYAN" "$RESET" "$*"; }
+printWarning() { printf '%s==> WARNING:%s %s\n' "$YELLOW" "$RESET" "$*"; }
+die()          { printf '%s==> ERROR:%s %s\n' "$RED" "$RESET" "$*" >&2; exit 1; }
 
-# ---------- usuário / privilégios ----------
-SIM=0
-PURGE=0
+# Print the comment block at the top of this file, without the leading "# "
+showHelp() {
+    awk 'NR > 2 && !/^#/ { exit } NR > 2 { sub(/^# ?/, ""); print }' "$0"
+}
+
+# ---------- user / privileges ----------
+assumeYes=0
+purge=0
+forwardedArgs=()
+newlyInstalledPackages=()
 if ((EUID == 0)); then
-    SUDO=()
-    USUARIO="${SUDO_USER:-}"
+    SUDO_COMMAND=()
+    TARGET_USER="${SUDO_USER:-}"
 else
-    SUDO=(sudo)
-    USUARIO="$USER"
+    SUDO_COMMAND=(sudo)
+    TARGET_USER="${USER:-$(id -un)}"
 fi
-root() { "${SUDO[@]}" "$@"; }
+readonly SUDO_COMMAND TARGET_USER
+asRoot() { "${SUDO_COMMAND[@]}" "$@"; }
 
-USER_UID=""
-USER_HOME=""
-if [[ -n $USUARIO && $USUARIO != root ]]; then
-    USER_UID="$(id -u "$USUARIO")"
-    USER_HOME="$(getent passwd "$USUARIO" | cut -d: -f6)"
+TARGET_UID=""
+TARGET_HOME=""
+if [[ -n $TARGET_USER && $TARGET_USER != root ]]; then
+    TARGET_UID="$(id -u "$TARGET_USER")"
+    TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
 fi
+readonly TARGET_UID TARGET_HOME
 
-# Roda um comando como o usuário normal, com acesso ao systemd --user dele
-como_usuario() {
-    [[ -n $USER_UID ]] || return 1
+# Run a command as the normal user, with access to their systemd --user
+asUser() {
+    [[ -n $TARGET_UID ]] || return 1
     if ((EUID == 0)); then
-        sudo -u "$USUARIO" \
-            XDG_RUNTIME_DIR="/run/user/$USER_UID" \
-            DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$USER_UID/bus" \
+        sudo -u "$TARGET_USER" \
+            HOME="$TARGET_HOME" \
+            XDG_RUNTIME_DIR="/run/user/$TARGET_UID" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$TARGET_UID/bus" \
             "$@"
     else
         "$@"
     fi
 }
 
-confirma() {   # confirma "pergunta" [padrão S|N]
-    ((SIM)) && return 0
-    local resp padrao="${2:-S}"
-    read -rp "$(printf '%s::%s %s [%s] ' "$C$B" "$N" "$1" "$([[ $padrao == S ]] && echo S/n || echo s/N)")" resp
-    resp="${resp,,}"; [[ -z $resp ]] && resp="${padrao,,}"
-    [[ $resp == s || $resp == sim || $resp == y || $resp == yes ]]
+# confirm "question" [default Y|N]
+confirm() {
+    ((assumeYes)) && return 0
+    local answer defaultAnswer="${2:-Y}"
+    read -rp "$(printf '%s::%s %s [%s] ' "$CYAN$BOLD" "$RESET" "$1" "$([[ $defaultAnswer == Y ]] && echo Y/n || echo y/N)")" answer
+    answer="${answer,,}"
+    [[ -z $answer ]] && answer="${defaultAnswer,,}"
+    [[ $answer == y || $answer == yes ]]
 }
 
-# ---------- dependências ----------
-dep_ok()      { pacman -T "$1" >/dev/null 2>&1; }
-no_repo()     { [[ -n $1 ]] && pacman -Si "$1" >/dev/null 2>&1; }
-tem_yay()     { command -v yay >/dev/null 2>&1; }
+# ---------- dependencies ----------
+isSatisfied()  { pacman -T "$1" >/dev/null 2>&1; }
+isInRepos()    { [[ -n $1 ]] && pacman -Si "$1" >/dev/null 2>&1; }
+hasYay()       { command -v yay >/dev/null 2>&1; }
 
-garantir_deps() {
-    info "Verificando dependências"
-    local item dep repo aur noconf=()
-    ((SIM)) && noconf=(--noconfirm)
-    if tem_yay; then
-        passo "yay encontrado: $(yay --version 2>/dev/null | head -1)"
+ensureDependencies() {
+    printInfo "Checking dependencies"
+    local entry dependency repoPackage aurPackage requirement noConfirm=()
+    ((assumeYes)) && noConfirm=(--noconfirm)
+    if hasYay; then
+        printStep "yay found: $(yay --version 2>/dev/null | head -1)"
     else
-        passo "yay não encontrado (só os repositórios oficiais serão usados)"
+        printStep "yay not found (only the official repositories will be used)"
     fi
 
-    for item in "${DEPS[@]}"; do
-        IFS='|' read -r dep repo aur <<<"$item"
-        if dep_ok "$dep"; then
-            passo "$dep: ${G}ok${N}"
+    for entry in "${DEPENDENCIES[@]}"; do
+        IFS='|' read -r dependency repoPackage aurPackage requirement <<<"$entry"
+        if isSatisfied "$dependency"; then
+            printStep "$dependency: ${GREEN}ok${RESET}"
             continue
         fi
-        if no_repo "$repo"; then
-            passo "$dep: instalando pelo pacman"
-            root pacman -S --needed "${noconf[@]}" "$repo" || morre "Falha ao instalar $repo"
-        elif [[ -n $aur ]] && tem_yay; then
-            [[ -n $USER_UID ]] || morre "$dep precisa do yay, que não roda como root. Rode o script como seu usuário."
-            passo "$dep: não está nos repositórios; instalando $aur pelo yay (AUR)"
-            como_usuario yay -S --needed "${noconf[@]}" "$aur" || morre "Falha ao instalar $aur pelo yay"
+        if isInRepos "$repoPackage"; then
+            printStep "$dependency: installing with pacman"
+            if asRoot pacman -S --needed "${noConfirm[@]}" "$repoPackage"; then
+                newlyInstalledPackages+=("$repoPackage")
+                continue
+            fi
+        elif [[ -n $aurPackage ]] && hasYay; then
+            [[ -n $TARGET_UID ]] || die "$dependency needs yay, which doesn't run as root. Run this script as your user."
+            printStep "$dependency: not in the repositories; installing $aurPackage with yay (AUR)"
+            if asUser yay -S --needed "${noConfirm[@]}" "$aurPackage"; then
+                newlyInstalledPackages+=("$aurPackage")
+                continue
+            fi
+        fi
+        if [[ $requirement == optional ]]; then
+            printWarning "$dependency could not be installed (optional, used by AppMan)."
         else
-            morre "$dep não encontrado nos repositórios${aur:+ e o yay não está instalado para buscar $aur no AUR}."
+            die "Could not install $dependency${aurPackage:+ (repositories or $aurPackage from the AUR with yay)}."
         fi
     done
 }
 
-# ---------- arquivos ----------
-instalar_arquivos() {
-    info "Instalando em $PREFIX"
-    [[ -f $SRC/src/$NAME ]] || morre "Arquivos do projeto não encontrados em $SRC/src (rode o install a partir do repositório)."
-
-    root install -Dm755 "$SRC/src/$NAME"                "$PREFIX/bin/$NAME"
-    root install -Dm755 "$SRC/src/$NAME-tray.py"        "$PREFIX/lib/$NAME-tray.py"
-    root install -Dm644 "$SRC/VERSION"                  "$PREFIX/VERSION"
-    root install -Dm644 "$SRC/data/$NAME.conf.example"  "$PREFIX/$NAME.conf.example"
-    [[ $SRC == "$PREFIX" ]] || root install -Dm755 "$SRC/install.sh" "$PREFIX/install.sh"
-
-    # Guarda de onde veio, para o "update" funcionar sem o repositório
-    local url="${CACHYOS_SHELLY_UPDATE_REPO:-}"
-    [[ -z $url && -d $SRC/.git ]] && url="$(git -C "$SRC" remote get-url origin 2>/dev/null || true)"
-    if [[ -n $url ]]; then
-        printf '%s\n' "$url" | root tee "$PREFIX/REPO" >/dev/null
-        passo "origem para updates: $url"
-    fi
-
-    root ln -sfn "$PREFIX/bin/$NAME" "$BINLINK"
-    root install -Dm644 "$SRC/data/$NAME.desktop"       "$APPDIR/$NAME.desktop"
-    root install -Dm644 "$SRC/data/$NAME-tray.desktop"  "$AUTOSTART/$NAME-tray.desktop"
-    root install -Dm644 "$SRC/data/$NAME.service"       "$UNITDIR/$NAME.service"
-    root install -Dm644 "$SRC/data/$NAME.timer"         "$UNITDIR/$NAME.timer"
-    passo "comando: $BINLINK"
-    passo "menu de aplicativos, autostart da bandeja e timer do systemd instalados"
+# Remember every package we installed, across reinstalls
+recordInstalledPackages() {
+    ((${#newlyInstalledPackages[@]})) || return 0
+    {
+        cat "$INSTALLED_PACKAGES_FILE" 2>/dev/null || true
+        printf '%s\n' "${newlyInstalledPackages[@]}"
+    } | sort -u | asRoot tee "$INSTALLED_PACKAGES_FILE.tmp" >/dev/null
+    asRoot mv -f "$INSTALLED_PACKAGES_FILE.tmp" "$INSTALLED_PACKAGES_FILE"
 }
 
-ativar() {
-    info "Ativando verificação automática e bandeja"
-    # Timer para todos os usuários (equivale ao que o cachy-update faz)
-    root systemctl --global enable "$NAME.timer" >/dev/null 2>&1 || warn "não consegui ativar o timer globalmente"
-
-    if como_usuario systemctl --user daemon-reload 2>/dev/null; then
-        como_usuario systemctl --user restart "$NAME.timer" 2>/dev/null && passo "timer iniciado"
-        # Primeira verificação em segundo plano para a bandeja já ter dados
-        como_usuario systemctl --user start --no-block "$NAME.service" 2>/dev/null || true
-    else
-        warn "Sessão do usuário não encontrada; o timer começa no próximo login."
-    fi
-
-    # (Re)inicia a bandeja na sessão gráfica atual
-    if ((EUID != 0)) && [[ -n ${WAYLAND_DISPLAY:-}${DISPLAY:-} ]]; then
-        pkill -u "$USER" -f "$NAME-tray.py" 2>/dev/null || true
-        sleep 0.5
-        setsid "$BINLINK" --tray >/dev/null 2>&1 < /dev/null &
-        passo "bandeja iniciada"
-    else
-        passo "a bandeja aparece no próximo login"
-    fi
+# ---------- AppMan ----------
+userBinDir() {
+    if ((EUID == 0)); then echo "$TARGET_HOME/.local/bin"; else echo "${XDG_BIN_HOME:-$HOME/.local/bin}"; fi
 }
 
-verificar_icones() {
-    if [[ ! -e /usr/share/icons/hicolor/scalable/apps/cachy-update-blue.svg ]]; then
-        warn "Ícones do cachy-update não encontrados; a bandeja vai usar ícones genéricos do tema."
-        warn "Para ter os mesmos ícones: sudo pacman -S cachy-update"
-    fi
-}
-
-oferecer_desativar_cachy_update() {
-    local ativo=0
-    como_usuario systemctl --user is-enabled arch-update.timer >/dev/null 2>&1 && ativo=1
-    como_usuario systemctl --user is-enabled arch-update-tray.service >/dev/null 2>&1 && ativo=1
-    pgrep -f arch-update-tray >/dev/null 2>&1 && ativo=1
-    ((ativo)) || return 0
-
-    echo
-    warn "O cachy-update também está ativo (vai ficar com dois ícones e duas verificações)."
-    if confirma "Desativar o timer e a bandeja do cachy-update? (o pacote continua instalado)" S; then
-        root systemctl --global disable arch-update.timer arch-update-tray.service >/dev/null 2>&1 || true
-        como_usuario systemctl --user disable --now arch-update.timer arch-update-tray.service >/dev/null 2>&1 || true
-        [[ -n $USER_HOME ]] && rm -f "$USER_HOME"/.config/autostart/{arch,cachy}-update-tray.desktop
-        pkill -f arch-update-tray 2>/dev/null || true
-        passo "cachy-update desativado (reative pelo CachyOS Hello quando quiser)"
-    fi
-}
-
-# ---------- comandos ----------
-cmd_install() {
-    command -v pacman >/dev/null || morre "Este instalador é para Arch/CachyOS (pacman não encontrado)."
-    local antiga=""; [[ -f $PREFIX/VERSION ]] && antiga="$(cat "$PREFIX/VERSION")"
-    info "cachyos-shelly-update $(cat "$SRC/VERSION")${antiga:+ (instalado: $antiga)}"
-
-    ((EUID != 0)) && { sudo -v || morre "sudo necessário"; }
-    garantir_deps
-    instalar_arquivos
-    ativar
-    verificar_icones
-    oferecer_desativar_cachy_update
-
-    echo
-    info "Pronto! Use '$NAME' no terminal ou clique no ícone da bandeja."
-    echo "   Atualizar:  $PREFIX/install.sh update"
-    echo "   Remover:    $PREFIX/install.sh uninstall"
-}
-
-cmd_update() {
-    command -v git >/dev/null || morre "git não encontrado."
-    ((EUID != 0)) && { sudo -v || morre "sudo necessário"; }
-
-    # 1) Rodando de dentro de um clone do repositório: git pull e reinstala
-    if [[ $SRC != "$PREFIX" && -d $SRC/.git ]]; then
-        info "Atualizando o repositório em $SRC"
-        if [[ -n $USER_UID ]]; then
-            como_usuario git -C "$SRC" pull --ff-only || morre "git pull falhou"
-        else
-            git -C "$SRC" pull --ff-only || morre "git pull falhou"
+findAppman() {
+    local candidate
+    for candidate in "$(asUser bash -c 'command -v appman' 2>/dev/null || true)" "$(userBinDir)/appman"; do
+        if [[ -n $candidate && -x $candidate ]]; then
+            echo "$candidate"
+            return 0
         fi
-        exec bash "$SRC/install.sh" install "${REPASSAR[@]}"
+    done
+    return 1
+}
+
+# AppMan has no package: its official installer just downloads the
+# APP-MANAGER script as ~/.local/bin/appman, which is what we do here.
+# It is not configured: the first "appman -i <app>" asks where to keep apps.
+ensureAppman() {
+    printInfo "Checking AppMan"
+    local appmanPath binDir downloadFile
+    if appmanPath="$(findAppman)"; then
+        printStep "appman: ${GREEN}ok${RESET} ($appmanPath)"
+        return 0
+    fi
+    if [[ -z $TARGET_UID ]]; then
+        printWarning "AppMan is per user and can't be installed for root. Run this script as your user to get it."
+        return 0
+    fi
+    binDir="$(userBinDir)"
+    downloadFile="$(asUser mktemp)"
+    printStep "appman: downloading to $binDir/appman"
+    if ! asUser curl -fsSL "$APPMAN_URL" -o "$downloadFile" || ! grep -q '^AMVERSION=' "$downloadFile"; then
+        asUser rm -f "$downloadFile"
+        printWarning "Could not download AppMan; AppMan apps won't be updated."
+        return 0
+    fi
+    asUser install -Dm755 "$downloadFile" "$binDir/appman"
+    asUser rm -f "$downloadFile"
+    printf '%s\n' "$binDir/appman" | asRoot tee "$INSTALLED_APPMAN_FILE" >/dev/null
+    printStep "appman: ${GREEN}installed${RESET} (run 'appman -h' to get started)"
+}
+
+# ---------- Python virtualenv for the tray ----------
+pythonVersion() { "$1" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null; }
+
+# Builds $VENV_DIR when it is missing, when requirements.txt changed, or when
+# the system Python moved to a new minor version (which breaks a venv).
+ensureVenv() {
+    local requirementsFile="$1" wantedHash wantedPython builtHash builtPython
+    wantedHash="$(sha256sum "$requirementsFile" | cut -d' ' -f1)"
+    wantedPython="$(pythonVersion python3)" || die "python3 not found."
+    builtHash="$(cat "$VENV_DIR/.requirements.sha256" 2>/dev/null || true)"
+    builtPython="$(pythonVersion "$VENV_DIR/bin/python" || true)"
+    if [[ $builtHash == "$wantedHash" && $builtPython == "$wantedPython" ]]; then
+        printStep "tray virtualenv: ${GREEN}ok${RESET} (Python $builtPython)"
+        return 0
+    fi
+    printStep "tray virtualenv: building with Python $wantedPython (downloads PyQt6)"
+    asRoot rm -rf "$VENV_DIR"
+    asRoot python3 -m venv "$VENV_DIR"
+    asRoot env PIP_ROOT_USER_ACTION=ignore "$VENV_DIR/bin/pip" install --quiet \
+        --disable-pip-version-check --no-cache-dir --only-binary=:all: -r "$requirementsFile" \
+        || die "Could not install the tray dependencies into $VENV_DIR."
+    printf '%s\n' "$wantedHash" | asRoot tee "$VENV_DIR/.requirements.sha256" >/dev/null
+}
+
+# ---------- files ----------
+installFiles() {
+    printInfo "Installing into $PREFIX"
+    [[ -f $SOURCE_DIR/src/$APP_NAME ]] || die "Project files not found in $SOURCE_DIR/src (run install from the repository)."
+
+    asRoot install -Dm755 "$SOURCE_DIR/src/$APP_NAME"                "$PREFIX/bin/$APP_NAME"
+    asRoot install -Dm755 "$SOURCE_DIR/src/$APP_NAME-tray.py"        "$PREFIX/lib/$APP_NAME-tray.py"
+    asRoot install -Dm644 "$SOURCE_DIR/VERSION"                      "$PREFIX/VERSION"
+    asRoot install -Dm644 "$SOURCE_DIR/requirements.txt"             "$PREFIX/requirements.txt"
+    asRoot install -Dm644 "$SOURCE_DIR/data/$APP_NAME.conf.example"  "$PREFIX/$APP_NAME.conf.example"
+    [[ $SOURCE_DIR == "$PREFIX" ]] || asRoot install -Dm755 "$SOURCE_DIR/install.sh" "$PREFIX/install.sh"
+
+    # Remember where we came from, so "update" works without the repository
+    local repoUrl="${CACHYOS_SHELLY_UPDATE_REPO:-}"
+    [[ -z $repoUrl && -d $SOURCE_DIR/.git ]] && repoUrl="$(git -C "$SOURCE_DIR" remote get-url origin 2>/dev/null || true)"
+    if [[ -n $repoUrl ]]; then
+        printf '%s\n' "$repoUrl" | asRoot tee "$PREFIX/REPO" >/dev/null
+        printStep "update source: $repoUrl"
     fi
 
-    # 2) Rodando de /opt: baixa a versão nova do repositório salvo na instalação
-    local url="${CACHYOS_SHELLY_UPDATE_REPO:-$(cat "$PREFIX/REPO" 2>/dev/null || true)}"
-    [[ -n $url ]] || morre "Não sei de onde atualizar. Rode com CACHYOS_SHELLY_UPDATE_REPO=<url-do-git> $0 update"
+    ensureVenv "$PREFIX/requirements.txt"
 
-    # Global (não local) para o trap ainda enxergar a pasta na saída do script
-    TMP_UPDATE="$(mktemp -d)"
-    local tmp="$TMP_UPDATE"
-    trap 'rm -rf "$TMP_UPDATE"' EXIT
-    chmod 755 "$tmp"
-    if [[ -n $USER_UID ]]; then
-        chown "$USUARIO" "$tmp" 2>/dev/null || true
+    asRoot ln -sfn "$PREFIX/bin/$APP_NAME" "$BIN_LINK"
+    asRoot install -Dm644 "$SOURCE_DIR/data/$APP_NAME.desktop"       "$APPLICATIONS_DIR/$APP_NAME.desktop"
+    asRoot install -Dm644 "$SOURCE_DIR/data/$APP_NAME-tray.desktop"  "$AUTOSTART_DIR/$APP_NAME-tray.desktop"
+    asRoot install -Dm644 "$SOURCE_DIR/data/$APP_NAME.service"       "$USER_UNIT_DIR/$APP_NAME.service"
+    asRoot install -Dm644 "$SOURCE_DIR/data/$APP_NAME.timer"         "$USER_UNIT_DIR/$APP_NAME.timer"
+    asRoot install -Dm644 "$SOURCE_DIR/data/$APP_NAME-venv.hook"     "$PACMAN_HOOK"
+    printStep "command: $BIN_LINK"
+    printStep "app menu entry, tray autostart, systemd timer and pacman hook installed"
+}
+
+enableServices() {
+    printInfo "Enabling the automatic check and the tray"
+    # Timer for every user (the same thing cachy-update does)
+    asRoot systemctl --global enable "$APP_NAME.timer" >/dev/null 2>&1 || printWarning "could not enable the timer globally"
+
+    if asUser systemctl --user daemon-reload 2>/dev/null; then
+        asUser systemctl --user restart "$APP_NAME.timer" 2>/dev/null && printStep "timer started"
+        # A first check in the background so the tray has data right away
+        asUser systemctl --user start --no-block "$APP_NAME.service" 2>/dev/null || true
+    else
+        printWarning "No user session found; the timer starts at the next login."
     fi
 
-    info "Baixando $url"
-    # Clona como o usuário (usa as chaves SSH/credenciais dele)
-    como_usuario git clone --quiet --depth 1 "$url" "$tmp/repo" 2>/dev/null \
-        || git clone --quiet --depth 1 "$url" "$tmp/repo" \
-        || morre "Falha ao clonar $url"
+    # (Re)start the tray in the current graphical session
+    if ((EUID != 0)) && [[ -n ${WAYLAND_DISPLAY:-}${DISPLAY:-} ]]; then
+        pkill -u "$USER" -f "$APP_NAME-tray.py" 2>/dev/null || true
+        sleep 0.5
+        setsid "$BIN_LINK" --tray >/dev/null 2>&1 < /dev/null &
+        printStep "tray started"
+    else
+        printStep "the tray appears at the next login"
+    fi
+}
 
-    local atual nova
-    atual="$(cat "$PREFIX/VERSION" 2>/dev/null || echo 0)"
-    nova="$(cat "$tmp/repo/VERSION")"
-    if [[ $atual == "$nova" ]] && ! confirma "Já está na versão $atual. Reinstalar mesmo assim?" N; then
-        info "Nada a fazer."
+checkIcons() {
+    if [[ ! -e /usr/share/icons/hicolor/scalable/apps/cachy-update-blue.svg ]]; then
+        printWarning "cachy-update icons not found; the tray will use generic theme icons."
+        printWarning "To get the same icons: sudo pacman -S cachy-update"
+    fi
+}
+
+offerToDisableCachyUpdate() {
+    local isActive=0
+    asUser systemctl --user is-enabled arch-update.timer >/dev/null 2>&1 && isActive=1
+    asUser systemctl --user is-enabled arch-update-tray.service >/dev/null 2>&1 && isActive=1
+    pgrep -f arch-update-tray >/dev/null 2>&1 && isActive=1
+    ((isActive)) || return 0
+
+    echo
+    printWarning "cachy-update is also active (you would get two icons and two checks)."
+    if confirm "Disable cachy-update's timer and tray? (the package stays installed)" Y; then
+        asRoot systemctl --global disable arch-update.timer arch-update-tray.service >/dev/null 2>&1 || true
+        asUser systemctl --user disable --now arch-update.timer arch-update-tray.service >/dev/null 2>&1 || true
+        [[ -n $TARGET_HOME ]] && rm -f "$TARGET_HOME"/.config/autostart/{arch,cachy}-update-tray.desktop
+        pkill -f arch-update-tray 2>/dev/null || true
+        printStep "cachy-update disabled (turn it back on in CachyOS Hello whenever you want)"
+    fi
+}
+
+# ---------- commands ----------
+cmdInstall() {
+    command -v pacman >/dev/null || die "This installer is for Arch/CachyOS (pacman not found)."
+    local installedVersion=""
+    [[ -f $PREFIX/VERSION ]] && installedVersion="$(cat "$PREFIX/VERSION")"
+    printInfo "$APP_NAME $(cat "$SOURCE_DIR/VERSION")${installedVersion:+ (installed: $installedVersion)}"
+
+    ((EUID != 0)) && { sudo -v || die "sudo is required"; }
+    ensureDependencies
+    asRoot mkdir -p "$PREFIX"
+    recordInstalledPackages
+    installFiles
+    ensureAppman
+    enableServices
+    checkIcons
+    offerToDisableCachyUpdate
+
+    echo
+    printInfo "Done! Run '$APP_NAME' in a terminal or click the tray icon."
+    echo "   Update:  $PREFIX/install.sh update"
+    echo "   Remove:  $PREFIX/install.sh uninstall"
+}
+
+cmdUpdate() {
+    command -v git >/dev/null || die "git not found."
+    ((EUID != 0)) && { sudo -v || die "sudo is required"; }
+
+    # 1) Running from a clone of the repository: git pull and reinstall
+    if [[ $SOURCE_DIR != "$PREFIX" && -d $SOURCE_DIR/.git ]]; then
+        printInfo "Updating the repository in $SOURCE_DIR"
+        if [[ -n $TARGET_UID ]]; then
+            asUser git -C "$SOURCE_DIR" pull --ff-only || die "git pull failed"
+        else
+            git -C "$SOURCE_DIR" pull --ff-only || die "git pull failed"
+        fi
+        exec bash "$SOURCE_DIR/install.sh" install "${forwardedArgs[@]}"
+    fi
+
+    # 2) Running from /opt: fetch the new version from the saved repository
+    local repoUrl="${CACHYOS_SHELLY_UPDATE_REPO:-$(cat "$PREFIX/REPO" 2>/dev/null || true)}"
+    [[ -n $repoUrl ]] || die "Don't know where to update from. Run: CACHYOS_SHELLY_UPDATE_REPO=<git-url> $0 update"
+
+    # Global (not local) so the EXIT trap still sees it when the script ends
+    UPDATE_TEMP_DIR="$(mktemp -d)"
+    trap 'rm -rf "$UPDATE_TEMP_DIR"' EXIT
+    chmod 755 "$UPDATE_TEMP_DIR"
+    if [[ -n $TARGET_UID ]]; then
+        chown "$TARGET_USER" "$UPDATE_TEMP_DIR" 2>/dev/null || true
+    fi
+
+    printInfo "Downloading $repoUrl"
+    # Clone as the user (uses their SSH keys/credentials)
+    asUser git clone --quiet --depth 1 "$repoUrl" "$UPDATE_TEMP_DIR/repo" 2>/dev/null \
+        || git clone --quiet --depth 1 "$repoUrl" "$UPDATE_TEMP_DIR/repo" \
+        || die "Could not clone $repoUrl"
+
+    local installedVersion newVersion
+    installedVersion="$(cat "$PREFIX/VERSION" 2>/dev/null || echo 0)"
+    newVersion="$(cat "$UPDATE_TEMP_DIR/repo/VERSION")"
+    if [[ $installedVersion == "$newVersion" ]] && ! confirm "Already at version $installedVersion. Reinstall anyway?" N; then
+        printInfo "Nothing to do."
         exit 0
     fi
-    CACHYOS_SHELLY_UPDATE_REPO="$url" bash "$tmp/repo/install.sh" install "${REPASSAR[@]}"
+    CACHYOS_SHELLY_UPDATE_REPO="$repoUrl" bash "$UPDATE_TEMP_DIR/repo/install.sh" install "${forwardedArgs[@]}"
 }
 
-cmd_uninstall() {
-    info "Removendo o cachyos-shelly-update"
-    ((EUID != 0)) && { sudo -v || morre "sudo necessário"; }
+# Called by the pacman hook after python is upgraded (runs as root, no prompts)
+cmdRebuildVenv() {
+    ((EUID == 0)) || die "rebuild-venv is run by pacman as root."
+    [[ -f $PREFIX/requirements.txt ]] || exit 0
+    # A subshell, so a failure (e.g. no network) warns instead of failing pacman's hook
+    (ensureVenv "$PREFIX/requirements.txt") || printWarning "Run '$PREFIX/install.sh update' to repair the tray."
+}
 
-    if [[ -n $USUARIO ]]; then
-        pkill -u "$USUARIO" -f "$NAME-tray.py" 2>/dev/null || true
-        como_usuario systemctl --user disable --now "$NAME.timer" >/dev/null 2>&1 || true
+cmdUninstall() {
+    printInfo "Removing $APP_NAME"
+    ((EUID != 0)) && { sudo -v || die "sudo is required"; }
+
+    # Read what we installed before $PREFIX is gone
+    local addedPackages=() addedAppman=""
+    [[ -f $INSTALLED_PACKAGES_FILE ]] && mapfile -t addedPackages < "$INSTALLED_PACKAGES_FILE"
+    [[ -f $INSTALLED_APPMAN_FILE ]] && addedAppman="$(cat "$INSTALLED_APPMAN_FILE")"
+
+    if [[ -n $TARGET_USER ]]; then
+        pkill -u "$TARGET_USER" -f "$APP_NAME-tray.py" 2>/dev/null || true
+        asUser systemctl --user disable --now "$APP_NAME.timer" >/dev/null 2>&1 || true
     fi
-    root systemctl --global disable "$NAME.timer" >/dev/null 2>&1 || true
+    asRoot systemctl --global disable "$APP_NAME.timer" >/dev/null 2>&1 || true
 
-    root rm -f "$BINLINK" "$APPDIR/$NAME.desktop" "$AUTOSTART/$NAME-tray.desktop" \
-               "$UNITDIR/$NAME.service" "$UNITDIR/$NAME.timer"
-    root rm -rf "$PREFIX"
-    como_usuario systemctl --user daemon-reload >/dev/null 2>&1 || true
-    passo "arquivos removidos"
+    asRoot rm -f "$BIN_LINK" "$APPLICATIONS_DIR/$APP_NAME.desktop" "$AUTOSTART_DIR/$APP_NAME-tray.desktop" \
+                 "$USER_UNIT_DIR/$APP_NAME.service" "$USER_UNIT_DIR/$APP_NAME.timer" "$PACMAN_HOOK"
+    # $PREFIX holds the tray virtualenv too, so this removes PyQt6 as well
+    asRoot rm -rf "$PREFIX"
+    asUser systemctl --user daemon-reload >/dev/null 2>&1 || true
+    printStep "files removed (including the tray virtualenv)"
 
-    if ((PURGE)) && [[ -n $USER_HOME ]]; then
-        rm -rf "$USER_HOME/.local/state/$NAME" "$USER_HOME/.config/$NAME"
-        passo "estado e configuração do usuário apagados"
+    if ((purge)); then
+        if [[ -n $TARGET_HOME ]]; then
+            rm -rf "$TARGET_HOME/.local/state/$APP_NAME" "$TARGET_HOME/.config/$APP_NAME"
+            printStep "user state and config deleted"
+        fi
+        removeAddedPackages "${addedPackages[@]}"
+        removeAddedAppman "$addedAppman"
+    elif ((${#addedPackages[@]})) || [[ -n $addedAppman ]]; then
+        echo "   Dependencies added by the installer were kept. Run with --purge to remove them too."
     fi
 
     echo
-    info "cachyos-shelly-update removido."
-    echo "   O Shelly e as outras dependências continuam instalados."
-    echo "   Para voltar ao cachy-update: CachyOS Hello > Apps/Tweaks > Cachy Update"
+    printInfo "$APP_NAME removed."
+    echo "   To go back to cachy-update: CachyOS Hello > Apps/Tweaks > Cachy Update"
 }
 
-cmd_status() {
-    local v="não instalado"; [[ -f $PREFIX/VERSION ]] && v="$(cat "$PREFIX/VERSION")"
-    info "cachyos-shelly-update: $v"
-    [[ -f $PREFIX/REPO ]] && passo "origem: $(cat "$PREFIX/REPO")"
-
-    info "Dependências"
-    local item dep repo aur
-    for item in "${DEPS[@]}"; do
-        IFS='|' read -r dep repo aur <<<"$item"
-        if dep_ok "$dep"; then passo "$dep: ${G}ok${N}"; else passo "$dep: ${R}faltando${N}"; fi
+# Offer to remove the packages the installer added (only those still installed)
+removeAddedPackages() {
+    local package stillInstalled=()
+    for package in "$@"; do
+        pacman -Q "$package" >/dev/null 2>&1 && stillInstalled+=("$package")
     done
-    if tem_yay; then passo "yay: ${G}ok${N}"; else passo "yay: não instalado"; fi
+    ((${#stillInstalled[@]})) || return 0
+    echo
+    printInfo "Packages installed by $APP_NAME: ${stillInstalled[*]}"
+    confirm "Remove them? (each one is kept if something else still needs it)" N || return 0
+    for package in "${stillInstalled[@]}"; do
+        if asRoot pacman -Rns --noconfirm "$package" >/dev/null 2>&1; then
+            printStep "$package removed"
+        else
+            printStep "$package kept (required by another package)"
+        fi
+    done
+}
 
-    info "Serviços"
-    passo "timer: $(como_usuario systemctl --user is-active "$NAME.timer" 2>/dev/null || echo inativo)"
-    if pgrep -f "$NAME-tray.py" >/dev/null; then passo "bandeja: rodando"; else passo "bandeja: parada"; fi
+# Offer to remove AppMan if the installer downloaded it. Apps installed
+# with AppMan are left alone: they are the user's.
+removeAddedAppman() {
+    local appmanPath="$1"
+    [[ -n $appmanPath && -f $appmanPath ]] || return 0
+    echo
+    printInfo "AppMan was installed by $APP_NAME ($appmanPath)."
+    confirm "Remove AppMan? (apps you installed with it are kept)" N || return 0
+    rm -f "$appmanPath"
+    printStep "AppMan removed"
+}
+
+cmdStatus() {
+    local installedVersion="not installed"
+    [[ -f $PREFIX/VERSION ]] && installedVersion="$(cat "$PREFIX/VERSION")"
+    printInfo "$APP_NAME: $installedVersion"
+    [[ -f $PREFIX/REPO ]] && printStep "source: $(cat "$PREFIX/REPO")"
+
+    printInfo "Dependencies"
+    local entry dependency repoPackage aurPackage requirement appmanPath
+    for entry in "${DEPENDENCIES[@]}"; do
+        IFS='|' read -r dependency repoPackage aurPackage requirement <<<"$entry"
+        if isSatisfied "$dependency"; then
+            printStep "$dependency: ${GREEN}ok${RESET}"
+        else
+            printStep "$dependency: ${RED}missing${RESET} ($requirement)"
+        fi
+    done
+    if hasYay; then printStep "yay: ${GREEN}ok${RESET}"; else printStep "yay: not installed"; fi
+    if appmanPath="$(findAppman)"; then printStep "appman: ${GREEN}ok${RESET} ($appmanPath)"; else printStep "appman: not installed"; fi
+    if "$VENV_DIR/bin/python" -c 'import PyQt6' 2>/dev/null; then
+        printStep "tray virtualenv: ${GREEN}ok${RESET}"
+    else
+        printStep "tray virtualenv: ${RED}broken or missing${RESET} (run: $PREFIX/install.sh update)"
+    fi
+
+    printInfo "Services"
+    printStep "timer: $(asUser systemctl --user is-active "$APP_NAME.timer" 2>/dev/null || echo inactive)"
+    if pgrep -f "$APP_NAME-tray.py" >/dev/null; then printStep "tray: running"; else printStep "tray: stopped"; fi
 }
 
 # ---------- main ----------
 main() {
-    local cmd=""
-    REPASSAR=()
+    local command=""
     while (($#)); do
         case "$1" in
-            install|update|uninstall|status) cmd="$1" ;;
-            -y|--yes)  SIM=1; REPASSAR+=(-y) ;;
-            --purge)   PURGE=1 ;;
-            -h|--help) sed -n '3,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-            *) morre "Opção desconhecida: $1 (veja $0 --help)" ;;
+            install|update|uninstall|status|rebuild-venv) command="$1" ;;
+            -y|--yes)  assumeYes=1; forwardedArgs+=(-y) ;;
+            --purge)   purge=1 ;;
+            -h|--help) showHelp; exit 0 ;;
+            *) die "Unknown option: $1 (see $0 --help)" ;;
         esac
         shift
     done
-    case "$cmd" in
-        install)   cmd_install ;;
-        update)    cmd_update ;;
-        uninstall) cmd_uninstall ;;
-        status)    cmd_status ;;
-        *) sed -n '3,18p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+    case "$command" in
+        install)      cmdInstall ;;
+        update)       cmdUpdate ;;
+        uninstall)    cmdUninstall ;;
+        status)       cmdStatus ;;
+        rebuild-venv) cmdRebuildVenv ;;
+        *) showHelp; exit 1 ;;
     esac
 }
 
-# Tudo dentro de main: o bash lê a função inteira antes de executar,
-# então o uninstall pode apagar este próprio arquivo sem problemas
+# Everything runs inside main: bash reads the whole function before running
+# it, so uninstall can delete this very file safely
 main "$@"
 exit

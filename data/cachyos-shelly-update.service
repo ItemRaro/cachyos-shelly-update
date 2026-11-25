@@ -1,5 +1,5 @@
 [Unit]
-Description=Verifica atualizações com o Shelly
+Description=Check for updates with Shelly and AppMan
 After=network-online.target
 
 [Service]
