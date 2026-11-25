@@ -141,7 +141,12 @@ verificar() {
     local b
     for b in repo aur flatpak appimage; do
         if ((ATIVO[$b])); then
-            "checar_$b" > "$STATEDIR/updates_$b.tmp"
+            case $b in
+                repo)     checar_repo ;;
+                aur)      checar_aur ;;
+                flatpak)  checar_flatpak ;;
+                appimage) checar_appimage ;;
+            esac > "$STATEDIR/updates_$b.tmp"
             mv -f "$STATEDIR/updates_$b.tmp" "$STATEDIR/updates_$b"
         else
             : > "$STATEDIR/updates_$b"

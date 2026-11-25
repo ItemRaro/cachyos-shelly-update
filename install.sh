@@ -97,8 +97,11 @@ garantir_deps() {
     info "Verificando dependências"
     local item dep repo aur noconf=()
     ((SIM)) && noconf=(--noconfirm)
-    tem_yay && passo "yay encontrado: $(yay --version 2>/dev/null | head -1)" \
-            || passo "yay não encontrado (só os repositórios oficiais serão usados)"
+    if tem_yay; then
+        passo "yay encontrado: $(yay --version 2>/dev/null | head -1)"
+    else
+        passo "yay não encontrado (só os repositórios oficiais serão usados)"
+    fi
 
     for item in "${DEPS[@]}"; do
         IFS='|' read -r dep repo aur <<<"$item"
@@ -234,10 +237,14 @@ cmd_update() {
     local url="${CACHYOS_SHELLY_UPDATE_REPO:-$(cat "$PREFIX/REPO" 2>/dev/null || true)}"
     [[ -n $url ]] || morre "Não sei de onde atualizar. Rode com CACHYOS_SHELLY_UPDATE_REPO=<url-do-git> $0 update"
 
-    local tmp; tmp="$(mktemp -d)"
+    # Global (não local) para o trap ainda enxergar a pasta na saída do script
+    TMP_UPDATE="$(mktemp -d)"
+    local tmp="$TMP_UPDATE"
+    trap 'rm -rf "$TMP_UPDATE"' EXIT
     chmod 755 "$tmp"
-    [[ -n $USER_UID ]] && chown "$USUARIO" "$tmp" 2>/dev/null || true
-    trap "rm -rf '$tmp'" EXIT
+    if [[ -n $USER_UID ]]; then
+        chown "$USUARIO" "$tmp" 2>/dev/null || true
+    fi
 
     info "Baixando $url"
     # Clona como o usuário (usa as chaves SSH/credenciais dele)
@@ -293,7 +300,7 @@ cmd_status() {
         IFS='|' read -r dep repo aur <<<"$item"
         if dep_ok "$dep"; then passo "$dep: ${G}ok${N}"; else passo "$dep: ${R}faltando${N}"; fi
     done
-    tem_yay && passo "yay: ${G}ok${N}" || passo "yay: não instalado"
+    if tem_yay; then passo "yay: ${G}ok${N}"; else passo "yay: não instalado"; fi
 
     info "Serviços"
     passo "timer: $(como_usuario systemctl --user is-active "$NAME.timer" 2>/dev/null || echo inativo)"
@@ -314,8 +321,13 @@ main() {
         esac
         shift
     done
-    [[ -n $cmd ]] || { sed -n '3,18p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
-    "cmd_$cmd"
+    case "$cmd" in
+        install)   cmd_install ;;
+        update)    cmd_update ;;
+        uninstall) cmd_uninstall ;;
+        status)    cmd_status ;;
+        *) sed -n '3,18p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+    esac
 }
 
 # Tudo dentro de main: o bash lê a função inteira antes de executar,

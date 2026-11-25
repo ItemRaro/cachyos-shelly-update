@@ -69,6 +69,23 @@ VERSION                    aumente a cada release (o update compara com isto)
 src/cachyos-shelly-update          script principal (bash)
 src/cachyos-shelly-update-tray.py  ícone da bandeja (PyQt6)
 data/                      .desktop, unidades systemd e exemplo de config
+tests/                     testes rodados no CI (não mexem no sistema)
+```
+
+## Testes e CI
+
+O pipeline do GitLab roda em todo merge request e em todo push na `main`:
+
+- **lint**: `shellcheck` nos scripts bash, `ruff` no Python (regras em `ruff.toml`) e validação dos `.desktop` e das unidades systemd.
+- **test**: `tests/smoke.sh` roda o atualizador de verdade contra um `shelly` falso, com HOME temporário e sem sudo. `tests/tray_smoke.py` monta a bandeja e o menu sem tela.
+
+Para rodar localmente:
+
+```bash
+shellcheck install.sh src/cachyos-shelly-update tests/smoke.sh
+bash tests/smoke.sh
+ruff check .
+QT_QPA_PLATFORM=offscreen python tests/tray_smoke.py   # precisa do python-pyqt6
 ```
 
 ## Arquivos instalados
