@@ -1,0 +1,10 @@
+[Unit]
+Description=Verificação periódica do cachyos-shelly-update
+
+[Timer]
+OnStartupSec=2min
+OnUnitActiveSec=6h
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

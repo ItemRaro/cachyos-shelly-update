@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=CachyOS-Shelly-Update (bandeja)
+Comment=Ícone de atualizações do Shelly na bandeja
+Exec=sh -c "sleep 3 && /usr/local/bin/cachyos-shelly-update --tray"
+Icon=cachy-update_app-icon
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+X-KDE-autostart-phase=2

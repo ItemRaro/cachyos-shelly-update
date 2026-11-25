@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=CachyOS-Shelly-Update
+Comment=Atualizar sistema e aplicativos com o Shelly
+Exec=/usr/local/bin/cachyos-shelly-update --wait
+Icon=cachy-update_app-icon
+Terminal=true
+Categories=System;

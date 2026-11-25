@@ -1,0 +1,8 @@
+# Copie para ~/.config/cachyos-shelly-update/cachyos-shelly-update.conf
+# Uma opção por linha (as mesmas da linha de comando).
+
+#--appman        # também atualiza os AppImages do AppMan
+#--no-devel      # ignora pacotes -git/-devel do AUR
+#--no-appimage   # não verifica/atualiza AppImages pelo Shelly
+#--no-flatpak
+#--no-aur

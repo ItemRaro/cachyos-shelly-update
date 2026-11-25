@@ -1,0 +1,7 @@
+[Unit]
+Description=Verifica atualizações com o Shelly
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/cachyos-shelly-update --check
