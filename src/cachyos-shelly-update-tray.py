@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtCore import QFileSystemWatcher, QTimer
-from PyQt6.QtGui import QAction, QIcon
+from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 NAME = "cachyos-shelly-update"
@@ -33,7 +33,7 @@ def shelly_update_bin() -> str:
 
 def ler_linhas(nome: str) -> list[str]:
     try:
-        return [l for l in (STATEDIR / nome).read_text().splitlines() if l.strip()]
+        return [linha for linha in (STATEDIR / nome).read_text().splitlines() if linha.strip()]
     except OSError:
         return []
 
