@@ -1,0 +1,107 @@
+---
+# GitLab CI configuration for cachyos-shelly-update
+#
+# Stages:
+#   lint  - shellcheck (bash), ruff (Python, rules in ruff.toml), and
+#           validation of the .desktop files and systemd user units
+#   test  - smoke tests that run the real scripts without touching a system:
+#           tests/smoke.sh drives the updater against a fake `shelly` on PATH,
+#           tests/tray_smoke.py builds the PyQt6 tray and its menu headless
+#
+# Runners: bash/data jobs on the shared shell runner (tags: docker,
+# shellscript), Python jobs on the shared Python runner (docker, python).
+# Images must be on each runner's allowed_images list.
+#
+# python:3.14-trixie: CachyOS ships Python 3.14, and the PyQt6 wheels need
+# glibc >= 2.34 (x86_64) / 2.39 (aarch64), which bookworm (2.36) only half
+# covers. --only-binary makes a missing wheel fail fast instead of trying a
+# source build that needs qmake.
+
+variables:
+  PIP_CACHE_DIR: $CI_PROJECT_DIR/.cache/pip
+  PIP_DISABLE_PIP_VERSION_CHECK: '1'
+  PIP_ROOT_USER_ACTION: ignore
+  # Pinned so a new release can't turn the pipeline red on its own; bump on purpose.
+  RUFF_VERSION: '0.16.10'
+  PYQT6_VERSION: '6.12.1'
+  PYTHON_IMAGE: python:3.14-trixie
+  SHELLCHECK_IMAGE: koalaman/shellcheck-alpine:v0.10.0
+
+stages:
+  - lint
+  - test
+
+# Pipelines run for merge requests and for pushes to main.
+.rules:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+.python:
+  extends: .rules
+  image: $PYTHON_IMAGE
+  tags: [docker, python]
+  cache:
+    key: pip-$CI_JOB_NAME
+    paths:
+      - .cache/pip/
+
+shellcheck:
+  extends: .rules
+  stage: lint
+  image: $SHELLCHECK_IMAGE
+  tags: [docker, shellscript]
+  cache: []
+  script:
+    - shellcheck --version
+    # src/cachyos-shelly-update has no .sh extension, so list files explicitly
+    - shellcheck install.sh src/cachyos-shelly-update tests/smoke.sh
+
+ruff:
+  extends: .python
+  stage: lint
+  script:
+    - 'pip install --quiet --only-binary=:all: "ruff==$RUFF_VERSION"'
+    - ruff --version
+    - ruff check --output-format=full .
+
+data_files:
+  extends: .rules
+  stage: lint
+  image: debian:bookworm
+  tags: [docker, shellscript]
+  cache: []
+  script:
+    - apt-get update -qq
+    - apt-get install -y -qq --no-install-recommends desktop-file-utils systemd >/dev/null
+    - desktop-file-validate data/*.desktop
+    # systemd-analyze checks that ExecStart exists, so install the script
+    # where the unit expects it, the same way install.sh does
+    - install -Dm755 src/cachyos-shelly-update /usr/local/bin/cachyos-shelly-update
+    - mkdir -p /tmp/xdg && chmod 700 /tmp/xdg
+    - XDG_RUNTIME_DIR=/tmp/xdg systemd-analyze --user verify data/cachyos-shelly-update.service data/cachyos-shelly-update.timer
+
+smoke:
+  extends: .rules
+  stage: test
+  image: bash:5
+  tags: [docker, shellscript]
+  cache: []
+  needs: [shellcheck]
+  script:
+    - bash tests/smoke.sh
+
+tray:
+  extends: .python
+  stage: test
+  needs: [ruff]
+  variables:
+    QT_QPA_PLATFORM: offscreen
+  script:
+    - apt-get update -qq
+    - >-
+      apt-get install -y -qq --no-install-recommends
+      libgl1 libegl1 libxkbcommon0 libfontconfig1 libdbus-1-3 libglib2.0-0t64 >/dev/null
+    - 'pip install --quiet --only-binary=:all: "PyQt6==$PYQT6_VERSION"'
+    - python --version
+    - python tests/tray_smoke.py
