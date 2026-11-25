@@ -38,7 +38,7 @@ O instalador:
 3. Copia os arquivos para **`/opt/cachyos-shelly-update`**. A instalação não depende do repositório, então o clone pode ser apagado depois.
 4. Cria um virtualenv Python próprio em `/opt/cachyos-shelly-update/.venv` com a dependência da bandeja (PyQt6, fixada no `requirements.txt`), sem instalar nada no Python do sistema. Um hook do pacman reconstrói o virtualenv quando o pacote `python` muda de versão.
 5. Cria o link `/usr/local/bin/cachyos-shelly-update`, o atalho no menu de aplicativos, o autostart da bandeja e o timer do systemd de usuário.
-6. Se o cachy-update estiver ativo, oferece desativar o timer e a bandeja dele, para não ficar com dois ícones. O pacote dele continua instalado.
+6. Desliga o cachy-update, para não ficar com dois ícones na bandeja e duas verificações: o timer dele (do usuário ou de todos os usuários), a bandeja no login e a bandeja que estiver rodando. O pacote e os arquivos dele não são mexidos; a bandeja é desligada para o seu usuário com um arquivo `~/.config/autostart/arch-update-tray.desktop` contendo `Hidden=true` (se você já tinha esse arquivo, ele é guardado). O que estava ligado fica registrado.
 
 ## Atualizar e remover
 
@@ -52,7 +52,7 @@ O instalador:
 
 O `update` usa a URL do `origin` gravada na instalação. Para trocar a origem, rode com `CACHYOS_SHELLY_UPDATE_REPO=<url>`. Se você rodar o `update` de dentro de um clone, ele faz `git pull` e reinstala.
 
-A remoção sempre apaga o virtualenv junto com o resto de `/opt/cachyos-shelly-update`. Com `--purge`, ela também oferece remover o que o instalador adicionou: só os pacotes que ele mesmo instalou (cada um fica se outro pacote ainda precisar dele) e o AppMan, se foi ele que baixou. Os apps que você instalou com o AppMan nunca são mexidos.
+A remoção sempre apaga o virtualenv junto com o resto de `/opt/cachyos-shelly-update`. Se o cachy-update estava ligado antes da instalação, ela pergunta se é para religá-lo (padrão: sim) e restaura exatamente o que estava ligado, inclusive o seu arquivo de autostart. Com `--purge`, ela também oferece remover o que o instalador adicionou: só os pacotes que ele mesmo instalou (cada um fica se outro pacote ainda precisar dele) e o AppMan, se foi ele que baixou. Os apps que você instalou com o AppMan nunca são mexidos.
 
 `-y` / `--yes` responde tudo automaticamente (o pacman e o yay recebem `--noconfirm`).
 
@@ -93,13 +93,14 @@ docs/pt-BR/                        documentação em português
 O pipeline do GitLab roda em todo merge request e em todo push na `main`:
 
 - **lint**: `shellcheck` nos scripts bash, `ruff` no Python (regras em `ruff.toml`) e validação dos `.desktop` e das unidades systemd.
-- **test**: `tests/smoke.sh` roda o atualizador de verdade contra um `shelly` e um `appman` falsos, com HOME temporário e sem sudo, incluindo apps do AppMan em cada formato de modelo. `tests/tray_smoke.py` monta a bandeja e o menu sem tela.
+- **test**: `tests/smoke.sh` roda o atualizador de verdade contra um `shelly` e um `appman` falsos, com HOME temporário e sem sudo, incluindo apps do AppMan em cada formato de modelo. `tests/cachy_update_handoff.sh` confere, com um `systemctl` falso, que a instalação desliga o cachy-update e que a remoção religa exatamente o que estava ligado. `tests/tray_smoke.py` monta a bandeja e o menu sem tela.
 
 Para rodar localmente:
 
 ```bash
-shellcheck install.sh src/cachyos-shelly-update tests/smoke.sh
+shellcheck install.sh src/cachyos-shelly-update tests/*.sh
 bash tests/smoke.sh
+bash tests/cachy_update_handoff.sh
 ruff check .
 pip install -r requirements.txt
 QT_QPA_PLATFORM=offscreen python tests/tray_smoke.py

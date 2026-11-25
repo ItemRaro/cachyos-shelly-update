@@ -36,7 +36,7 @@ The installer:
 3. Copies the files to **`/opt/cachyos-shelly-update`**. The installation doesn't depend on the repository, so the clone can be deleted afterwards.
 4. Creates a private Python virtualenv in `/opt/cachyos-shelly-update/.venv` with the tray's dependency (PyQt6, pinned in `requirements.txt`), so nothing is added to the system Python. A pacman hook rebuilds it when the `python` package moves to a new version.
 5. Creates the `/usr/local/bin/cachyos-shelly-update` link, the app menu entry, the tray autostart and the systemd user timer.
-6. If cachy-update is active, offers to disable its timer and tray so you don't get two icons. Its package stays installed.
+6. Turns cachy-update off, so you don't get two tray icons and two checks: its timer (per user or for all users), its tray at login and the running tray. The package and its files stay untouched; the tray is switched off for your user with an `~/.config/autostart/arch-update-tray.desktop` file containing `Hidden=true` (your own copy of that file, if any, is backed up). What was on is recorded.
 
 ## Updating and removing
 
@@ -50,7 +50,7 @@ The installer:
 
 `update` uses the `origin` URL saved at install time. To change it, run it with `CACHYOS_SHELLY_UPDATE_REPO=<url>`. If you run `update` from inside a clone, it does a `git pull` and reinstalls.
 
-Uninstalling always removes the virtualenv with everything else in `/opt/cachyos-shelly-update`. With `--purge` it also offers to remove what the installer added: only the packages it installed itself (each one is kept if another package still needs it) and AppMan, if it downloaded it. Apps you installed with AppMan are never touched.
+Uninstalling always removes the virtualenv with everything else in `/opt/cachyos-shelly-update`. If cachy-update was on before the install, it asks whether to turn it back on (default: yes) and restores exactly what was on, including your own autostart file. With `--purge` it also offers to remove what the installer added: only the packages it installed itself (each one is kept if another package still needs it) and AppMan, if it downloaded it. Apps you installed with AppMan are never touched.
 
 `-y` / `--yes` answers everything automatically (pacman and yay get `--noconfirm`).
 
@@ -91,13 +91,14 @@ docs/pt-BR/                        Portuguese documentation
 The GitLab pipeline runs on every merge request and every push to `main`:
 
 - **lint**: `shellcheck` on the bash scripts, `ruff` on the Python (rules in `ruff.toml`), and validation of the `.desktop` files and the systemd units.
-- **test**: `tests/smoke.sh` runs the real updater against fake `shelly` and `appman` commands, with a temporary HOME and no sudo, including AppMan apps built from each template layout. `tests/tray_smoke.py` builds the tray and its menu without a display.
+- **test**: `tests/smoke.sh` runs the real updater against fake `shelly` and `appman` commands, with a temporary HOME and no sudo, including AppMan apps built from each template layout. `tests/cachy_update_handoff.sh` checks that installing turns cachy-update off and uninstalling turns back on exactly what was on, with fake `systemctl`. `tests/tray_smoke.py` builds the tray and its menu without a display.
 
 To run them locally:
 
 ```bash
-shellcheck install.sh src/cachyos-shelly-update tests/smoke.sh
+shellcheck install.sh src/cachyos-shelly-update tests/*.sh
 bash tests/smoke.sh
+bash tests/cachy_update_handoff.sh
 ruff check .
 pip install -r requirements.txt
 QT_QPA_PLATFORM=offscreen python tests/tray_smoke.py
