@@ -1,100 +1,121 @@
 # cachyos-shelly-update
 
-Atualizador no estilo do [cachy-update](https://github.com/CachyOS/cachy-update) / [arch-update](https://github.com/Antiz96/arch-update), usando o **[Shelly](https://github.com/Seafoam-Labs/Shelly-ALPM)** como backend: repositórios, AUR, Flatpak e AppImage num comando só, com verificação automática e ícone na bandeja.
+> 🇧🇷 [Versão em português](./docs/pt-BR/README.md)
 
-## O que ele faz
+An updater in the style of [cachy-update](https://github.com/CachyOS/cachy-update) / [arch-update](https://github.com/Antiz96/arch-update) that uses **[Shelly](https://github.com/Seafoam-Labs/Shelly-ALPM)** as the backend and also updates **[AppMan](https://github.com/ivan-hc/AM)** apps. Repositories, AUR, Flatpak, AppImage and AppMan in one command, with automatic checks and a tray icon.
 
-- **`cachyos-shelly-update`**: lista as atualizações separadas por origem, pergunta e roda `shelly upgrade all`. Depois mostra os `.pacnew`, os pacotes órfãos e avisa se o kernel mudou.
-- **Verificação automática**: um timer do systemd roda `cachyos-shelly-update --check` 2 min após o login e depois a cada 6 h. Quando surge atualização nova, aparece uma notificação.
-- **Bandeja**: usa os mesmos ícones do cachy-update e respeita o `TrayIconStyle` do `arch-update.conf`.
-  - Clique esquerdo abre o atualizador no terminal.
-  - Clique direito mostra a lista por origem, a última e a próxima verificação, e as opções "Verificar agora" e "Sair".
+## What it does
 
-## Instalação
+- **`cachyos-shelly-update`** lists the updates grouped by source, asks, runs `shelly upgrade all` and then `appman -u`. Afterwards it shows pending `.pacnew` files and orphan packages, and warns when the kernel changed.
+- **Automatic checks**: a systemd timer runs `cachyos-shelly-update --check` 2 minutes after login and then every 6 hours. A notification shows up when new updates appear.
+- **Tray icon**: uses cachy-update's icons and honors `TrayIconStyle` from `arch-update.conf`.
+  - Left click opens the updater in a terminal.
+  - Right click shows the updates per source, the last and next check, and "Check for updates" and "Quit".
+
+### AppMan
+
+AppMan has no "check only" command: `appman -u` downloads right away. To list AppMan updates without applying them, cachyos-shelly-update runs only the first part of each app's `AM-updater` script, the part that reads the installed version and asks upstream for the latest one, and stops before the download. This works with the scripts generated from AppMan's templates (10,204 of the 10,206 apps in its catalog today); apps whose script doesn't follow them are left out of the list but are still updated by `appman -u`. Each check has a 30-second limit (`CACHYOS_SHELLY_UPDATE_PROBE_TIMEOUT`).
+
+AppMan is skipped when it isn't installed or has never been set up (no `~/.config/appman/appman-config`). Use `--no-appman` to turn it off.
+
+## Installation
 
 ```bash
-git clone <url-deste-repo> cachyos-shelly-update
+git clone <this-repo-url> cachyos-shelly-update
 cd cachyos-shelly-update
 ./install.sh install
 ```
 
-Rode como **usuário normal**: o script pede o `sudo` quando precisa, e o `yay` não pode rodar como root.
+Run it as your **normal user**: the script asks for `sudo` when it needs to, and `yay` and AppMan refuse to run as root.
 
-O instalador:
+The installer:
 
-1. Verifica ou instala as dependências: `shelly`, `shelly-flatpak-backend`, `flatpak`, `python-pyqt6`, `pacman-contrib` e `libnotify`.
-   Primeiro procura nos repositórios (o CachyOS já tem o Shelly). Se um pacote não estiver lá e o **yay** estiver instalado, usa a versão `-bin` do AUR. Pacotes que só *fornecem* a dependência, como o `shelly-bin`, também contam.
-2. Copia os arquivos para **`/opt/cachyos-shelly-update`**. A instalação não depende do repositório, então o clone pode ser apagado depois.
-3. Cria o link `/usr/local/bin/cachyos-shelly-update`, o atalho no menu de aplicativos, o autostart da bandeja e o timer do systemd de usuário.
-4. Se o cachy-update estiver ativo, oferece desativar o timer e a bandeja dele, para não ficar com dois ícones. O pacote dele continua instalado.
+1. Checks for and installs the dependencies: `shelly`, `shelly-flatpak-backend`, `flatpak`, `python`, `pacman-contrib`, `libnotify` and `curl`, plus tools AppMan uses to unpack apps (`wget`, `unzip`, `7zip`, `binutils`, `file`, `xz`; optional).
+   It looks in the repositories first (CachyOS already ships Shelly). If a package isn't there and **yay** is installed, it uses the `-bin` version from the AUR. Packages that only *provide* a dependency, like `shelly-bin`, count too.
+2. Installs **AppMan** in `~/.local/bin/appman` if you don't have it, the same way AppMan's own installer does. It isn't configured: the first `appman -i <app>` asks where to keep apps.
+3. Copies the files to **`/opt/cachyos-shelly-update`**. The installation doesn't depend on the repository, so the clone can be deleted afterwards.
+4. Creates a private Python virtualenv in `/opt/cachyos-shelly-update/.venv` with the tray's dependency (PyQt6, pinned in `requirements.txt`), so nothing is added to the system Python. A pacman hook rebuilds it when the `python` package moves to a new version.
+5. Creates the `/usr/local/bin/cachyos-shelly-update` link, the app menu entry, the tray autostart and the systemd user timer.
+6. If cachy-update is active, offers to disable its timer and tray so you don't get two icons. Its package stays installed.
 
-## Atualizar e remover
+## Updating and removing
 
 ```bash
-/opt/cachyos-shelly-update/install.sh update       # baixa a versão nova do git e reinstala
-/opt/cachyos-shelly-update/install.sh uninstall    # remove (o Shelly continua instalado)
-/opt/cachyos-shelly-update/install.sh uninstall --purge   # remove e apaga o estado/config do usuário
-/opt/cachyos-shelly-update/install.sh status       # versão, dependências, timer e bandeja
+/opt/cachyos-shelly-update/install.sh update              # fetch the new version from git and reinstall
+/opt/cachyos-shelly-update/install.sh uninstall           # remove it (dependencies stay)
+/opt/cachyos-shelly-update/install.sh uninstall --purge   # also delete your state/config and offer to
+                                                          # remove the packages and AppMan it installed
+/opt/cachyos-shelly-update/install.sh status              # version, dependencies, virtualenv, timer and tray
 ```
 
-O `update` usa a URL do `origin` gravada na instalação. Para trocar a origem, rode com `CACHYOS_SHELLY_UPDATE_REPO=<url>`. Se você rodar o `update` de dentro de um clone, ele faz `git pull` e reinstala.
+`update` uses the `origin` URL saved at install time. To change it, run it with `CACHYOS_SHELLY_UPDATE_REPO=<url>`. If you run `update` from inside a clone, it does a `git pull` and reinstalls.
 
-`-y` / `--yes` responde tudo automaticamente (o pacman e o yay recebem `--noconfirm`).
+Uninstalling always removes the virtualenv with everything else in `/opt/cachyos-shelly-update`. With `--purge` it also offers to remove what the installer added: only the packages it installed itself (each one is kept if another package still needs it) and AppMan, if it downloaded it. Apps you installed with AppMan are never touched.
 
-## Uso
+`-y` / `--yes` answers everything automatically (pacman and yay get `--noconfirm`).
 
-| Comando | Descrição |
+## Usage
+
+| Command | Description |
 |---|---|
-| `cachyos-shelly-update` | lista, pergunta e atualiza |
-| `cachyos-shelly-update -l` | só lista |
-| `cachyos-shelly-update -y` | atualiza sem perguntar |
-| `cachyos-shelly-update -c` | verificação silenciosa (a que o timer usa) |
-| `cachyos-shelly-update --tray` | inicia o ícone da bandeja |
-| `--no-repo` `--no-aur` `--no-flatpak` `--no-appimage` `--no-devel` | pulam origens |
-| `--appman` | também roda `appman -u` |
+| `cachyos-shelly-update` | list, ask and update |
+| `cachyos-shelly-update -l` | only list |
+| `cachyos-shelly-update -y` | update without asking |
+| `cachyos-shelly-update -c` | silent check (the one the timer uses) |
+| `cachyos-shelly-update --tray` | start the tray icon |
+| `--no-repo` `--no-aur` `--no-flatpak` `--no-appimage` `--no-appman` `--no-devel` | skip sources |
 
-Para deixar opções fixas, crie `~/.config/cachyos-shelly-update/cachyos-shelly-update.conf` com uma opção por linha. Há um exemplo em `/opt/cachyos-shelly-update/cachyos-shelly-update.conf.example`.
+To make options permanent, create `~/.config/cachyos-shelly-update/cachyos-shelly-update.conf` with one option per line. There is an example in `/opt/cachyos-shelly-update/cachyos-shelly-update.conf.example`.
 
-Para mudar o intervalo de verificação:
+To change the check interval:
 
 ```bash
 systemctl --user edit cachyos-shelly-update.timer
 ```
 
-## Estrutura
+## Layout
 
 ```
-install.sh                 instalar / atualizar / remover / status
-VERSION                    aumente a cada release (o update compara com isto)
-src/cachyos-shelly-update          script principal (bash)
-src/cachyos-shelly-update-tray.py  ícone da bandeja (PyQt6)
-data/                      .desktop, unidades systemd e exemplo de config
-tests/                     testes rodados no CI (não mexem no sistema)
+install.sh                         install / update / uninstall / status
+VERSION                            bump on every release (update compares against it)
+requirements.txt                   the tray's Python dependencies (pinned)
+src/cachyos-shelly-update          main script (bash)
+src/cachyos-shelly-update-tray.py  tray icon (PyQt6)
+data/                              .desktop files, systemd units, pacman hook, config example
+tests/                             tests run by CI (they don't touch the system)
+docs/pt-BR/                        Portuguese documentation
 ```
 
-## Testes e CI
+## Tests and CI
 
-O pipeline do GitLab roda em todo merge request e em todo push na `main`:
+The GitLab pipeline runs on every merge request and every push to `main`:
 
-- **lint**: `shellcheck` nos scripts bash, `ruff` no Python (regras em `ruff.toml`) e validação dos `.desktop` e das unidades systemd.
-- **test**: `tests/smoke.sh` roda o atualizador de verdade contra um `shelly` falso, com HOME temporário e sem sudo. `tests/tray_smoke.py` monta a bandeja e o menu sem tela.
+- **lint**: `shellcheck` on the bash scripts, `ruff` on the Python (rules in `ruff.toml`), and validation of the `.desktop` files and the systemd units.
+- **test**: `tests/smoke.sh` runs the real updater against fake `shelly` and `appman` commands, with a temporary HOME and no sudo, including AppMan apps built from each template layout. `tests/tray_smoke.py` builds the tray and its menu without a display.
 
-Para rodar localmente:
+To run them locally:
 
 ```bash
 shellcheck install.sh src/cachyos-shelly-update tests/smoke.sh
 bash tests/smoke.sh
 ruff check .
-QT_QPA_PLATFORM=offscreen python tests/tray_smoke.py   # precisa do python-pyqt6
+pip install -r requirements.txt
+QT_QPA_PLATFORM=offscreen python tests/tray_smoke.py
 ```
 
-## Arquivos instalados
+## Installed files
 
-| Caminho | Conteúdo |
+| Path | Contents |
 |---|---|
-| `/opt/cachyos-shelly-update/` | programa, `install.sh`, `VERSION`, `REPO` |
-| `/usr/local/bin/cachyos-shelly-update` | link para o comando |
-| `/usr/local/share/applications/cachyos-shelly-update.desktop` | atalho no menu |
-| `/etc/xdg/autostart/cachyos-shelly-update-tray.desktop` | bandeja ao iniciar a sessão |
-| `/etc/systemd/user/cachyos-shelly-update.{service,timer}` | verificação automática |
-| `~/.local/state/cachyos-shelly-update/` | estado (lista de updates, ícone atual) |
+| `/opt/cachyos-shelly-update/` | the program, `install.sh`, `VERSION`, `REPO`, the `.venv` virtualenv |
+| `/usr/local/bin/cachyos-shelly-update` | link to the command |
+| `/usr/local/share/applications/cachyos-shelly-update.desktop` | app menu entry |
+| `/etc/xdg/autostart/cachyos-shelly-update-tray.desktop` | tray at session start |
+| `/etc/systemd/user/cachyos-shelly-update.{service,timer}` | automatic checks |
+| `/etc/pacman.d/hooks/cachyos-shelly-update-venv.hook` | rebuilds the virtualenv after Python upgrades |
+| `~/.local/bin/appman` | AppMan, if the installer downloaded it |
+| `~/.local/state/cachyos-shelly-update/` | state (updates per source, current icon) |
+
+## Changelog
+
+See [CHANGELOG.md](./CHANGELOG.md).
