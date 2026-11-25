@@ -1,0 +1,4 @@
+# Python dependencies of the tray icon, installed into a private virtualenv
+# (/opt/cachyos-shelly-update/.venv) by install.sh and used by CI.
+# Pinned on purpose: bump it, run the tests, then release.
+PyQt6==6.12.1

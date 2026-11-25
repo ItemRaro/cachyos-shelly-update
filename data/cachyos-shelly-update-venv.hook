@@ -1,0 +1,12 @@
+# Rebuilds the tray's Python virtualenv after a Python upgrade.
+# A virtualenv is tied to the Python minor version (3.14 -> 3.15 breaks it);
+# rebuild-venv only rebuilds when the version or requirements.txt changed.
+[Trigger]
+Operation = Upgrade
+Type = Package
+Target = python
+
+[Action]
+Description = Checking the cachyos-shelly-update tray virtualenv...
+When = PostTransaction
+Exec = /opt/cachyos-shelly-update/install.sh rebuild-venv
