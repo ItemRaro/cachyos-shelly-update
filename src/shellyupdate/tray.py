@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 
 from PyQt6.QtCore import QFileSystemWatcher, QTimer
 from PyQt6.QtGui import QIcon
@@ -79,7 +80,7 @@ def sourceCounts() -> list[tuple[str, int]]:
 
 
 class TrayApp:
-    def __init__(self, app: QApplication):
+    def __init__(self, app: QApplication) -> None:
         self.app = app
         self.tray = QSystemTrayIcon()
         self.menu = QMenu()
@@ -90,12 +91,15 @@ class TrayApp:
         core.STATE_DIR.mkdir(parents=True, exist_ok=True)
         # Watch the state directory: the updater replaces the files with
         # rename, so watching the directory is more reliable than each file
-        self.debounceTimer = QTimer(singleShot=True, interval=STATE_DEBOUNCE_MS)
+        self.debounceTimer = QTimer()
+        self.debounceTimer.setSingleShot(True)
+        self.debounceTimer.setInterval(STATE_DEBOUNCE_MS)
         self.debounceTimer.timeout.connect(self.refresh)
         self.watcher = QFileSystemWatcher([str(core.STATE_DIR)])
         self.watcher.directoryChanged.connect(lambda _: self.debounceTimer.start())
         # Safety net in case a file system event is lost
-        self.pollTimer = QTimer(interval=STATE_POLL_INTERVAL_MS)
+        self.pollTimer = QTimer()
+        self.pollTimer.setInterval(STATE_POLL_INTERVAL_MS)
         self.pollTimer.timeout.connect(self.refresh)
         self.pollTimer.start()
 
@@ -107,9 +111,9 @@ class TrayApp:
         names = core.readLines("tray_icon")
         return names[0].strip() if names else core.currentTrayIcon(bool(updateCount))
 
-    def refresh(self):
+    def refresh(self) -> None:
         updateCount = len(core.readLines("updates_all"))
-        icon = QIcon.fromTheme(self.iconName(updateCount))
+        icon: QIcon = QIcon.fromTheme(self.iconName(updateCount))
         if icon.isNull():
             # Fallback when cachy-update's icons aren't installed
             icon = QIcon.fromTheme("update-high" if updateCount else "update-none",
@@ -121,41 +125,50 @@ class TrayApp:
         self.tray.setVisible(bool(updateCount) or not core.showTrayWhenRelevant())
 
     # ---------- menu ----------
-    def buildMenu(self):
+    def addMenuItem(self, text: str, onTriggered: Callable[[], object] | None = None) -> None:
+        """A menu entry; without a handler, a disabled label."""
+        action = self.menu.addAction(text)
+        if action is None:      # allowed by PyQt6's type stubs; Qt never does it
+            return
+        if onTriggered is None:
+            action.setEnabled(False)
+        else:
+            action.triggered.connect(onTriggered)
+
+    def buildMenu(self) -> None:
         """cachy-update's menu, rebuilt each time it opens."""
-        menu = self.menu
-        menu.clear()
+        self.menu.clear()
         updateCount = len(core.readLines("updates_all"))
 
         if updateCount:
-            menu.addAction(core.updatesAvailableText(updateCount)).triggered.connect(self.runUpdater)
+            self.addMenuItem(core.updatesAvailableText(updateCount), self.runUpdater)
         else:
-            menu.addAction("System is up to date").setEnabled(False)
+            self.addMenuItem("System is up to date")
 
         counts = sourceCounts()
         for title, count in counts:
-            menu.addAction(f"{title} ({count})").triggered.connect(self.runUpdater)
+            self.addMenuItem(f"{title} ({count})", self.runUpdater)
         if counts:
-            menu.addSeparator()
+            self.menu.addSeparator()
 
         lastCheck = timeSinceLastCheck()
         if lastCheck:
-            menu.addAction(f"Last check {lastCheck} ago").setEnabled(False)
+            self.addMenuItem(f"Last check {lastCheck} ago")
         nextCheck = timeUntilNextCheck()
         if nextCheck:
-            menu.addAction(f"Next check in {nextCheck}").setEnabled(False)
+            self.addMenuItem(f"Next check in {nextCheck}")
 
-        menu.addSeparator()
-        menu.addAction(f"Run {core.DISPLAY_NAME}").triggered.connect(self.runUpdater)
-        menu.addAction("Check for updates").triggered.connect(self.runCheck)
-        menu.addAction("Exit").triggered.connect(self.app.quit)
+        self.menu.addSeparator()
+        self.addMenuItem(f"Run {core.DISPLAY_NAME}", self.runUpdater)
+        self.addMenuItem("Check for updates", self.runCheck)
+        self.addMenuItem("Exit", self.app.quit)
 
     # ---------- actions ----------
-    def onActivated(self, reason):
+    def onActivated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
             self.runUpdater()
 
-    def runUpdater(self):
+    def runUpdater(self) -> None:
         """Open the updater in the user's default terminal emulator."""
         command = terminal.terminalCommand([updaterBinary(), "--wait"], core.CONFIG_HOME)
         if command is None:
@@ -164,17 +177,17 @@ class TrayApp:
             return
         subprocess.Popen(command, start_new_session=True)
 
-    def runCheck(self):
+    def runCheck(self) -> None:
         """Like cachy-update: start a check; the icon follows when the state changes."""
         subprocess.Popen([updaterBinary(), "--check"], start_new_session=True,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def main():
+def main() -> None:
     # Only one tray at a time; the lock lives as long as the process
-    lockFile = open(core.RUN_DIR / f"{core.APP_NAME}-tray.lock", "w")
+    lockDescriptor = core.openLockFile(core.RUN_DIR / f"{core.APP_NAME}-tray.lock")
     try:
-        fcntl.flock(lockFile, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(lockDescriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         print(f"The {core.APP_NAME} tray icon is already running.", file=sys.stderr)
         sys.exit(1)

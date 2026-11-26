@@ -35,9 +35,10 @@ for terminalName in ("ghostty", "alacritty"):
     fakeTerminal = fakeBinDir / terminalName
     fakeTerminal.write_text(f'#!/bin/sh\necho "{terminalName} $*" >> "{terminalLog}"\n')
     fakeTerminal.chmod(0o755)
-# systemctl list-timers -o json, as cachy-update reads it: next run in ~59 min
+# systemctl list-timers -o json, as cachy-update reads it: the next run is
+# 59 min 5 s after the moment it is asked (not after this script started)
 (fakeBinDir / "systemctl").write_text(
-    f'#!/bin/sh\necho \'[{{"next": {int((time.time() + 3545) * 1_000_000)}}}]\'\n')
+    '#!/bin/sh\necho "[{\\"next\\": $(( ($(date +%s) + 3545) * 1000000 ))}]"\n')
 (fakeBinDir / "systemctl").chmod(0o755)
 
 stateDir = tempDir / "state" / "cachyos-shelly-update"
@@ -61,9 +62,12 @@ writeState({"repo": ["bar 2.0-1 -> 2.1-1"], "aur": ["foo-bin 1.0 -> 1.1", "baz-g
             "appman": ["someapp 1.2.0 -> 1.3.0"]})
 
 sys.path.insert(0, str(REPO_ROOT / "src"))
+from PyQt6.QtGui import QIcon  # noqa: E402
+from PyQt6.QtWidgets import QApplication  # noqa: E402
+
 from shellyupdate import tray  # noqa: E402
 
-failures = []
+failures: list[str] = []
 
 
 def check(description, condition):
@@ -78,9 +82,9 @@ def menuTexts(trayApp):
 
 check("kdeIconTheme reads kdeglobals", tray.kdeIconTheme() == "Papirus-Dark")
 
-app = tray.QApplication(sys.argv)
+app = QApplication(sys.argv)
 tray.applyIconTheme()
-check("applyIconTheme uses KDE's theme when Qt has none", tray.QIcon.themeName() == "Papirus-Dark")
+check("applyIconTheme uses KDE's theme when Qt has none", QIcon.themeName() == "Papirus-Dark")
 
 trayApp = tray.TrayApp(app)
 check("tooltip shows the total", "4 updates available" in trayApp.tray.toolTip())
@@ -96,7 +100,10 @@ check("one entry per source with updates, count only, in order",
 check("no submenus (no package lists)", not any(action.menu() for action in trayApp.menu.actions()))
 check("no entry for sources without updates",
       not any(t.startswith(("Flatpak", "AppImage")) for t in texts))
-check("last check in cachy-update's format", "Last check 10m ago" in texts)
+# (Seconds may have passed since the state was written: PyQt6 takes a moment
+# to load. The exact format is tested in test_units.py.)
+check("last check in cachy-update's format",
+      any(t.startswith("Last check 10m") and t.endswith(" ago") for t in texts))
 check("next check from the systemd timer", any(t.startswith("Next check in 59m") for t in texts))
 check("cachy-update's fixed actions, in order",
       texts[-3:] == ["Run CachyOS-Shelly-Update", "Check for updates", "Exit"])

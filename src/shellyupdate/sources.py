@@ -11,6 +11,7 @@ the way of pacman, Shelly or an AUR helper:
   - AUR and AppImage: Shelly only reads the local package database
 """
 
+import contextlib
 import json
 import os
 import re
@@ -19,8 +20,10 @@ import signal
 import subprocess
 import tempfile
 import threading
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 from .core import CONFIG_HOME, HOME_DIR
 
@@ -36,8 +39,11 @@ APPMAN_INSTALLED_VERSION_PATTERN = re.compile(r"^version0=")
 # Also indented, or after ")" when set inside a "case $SITE" block
 APPMAN_LATEST_VERSION_PATTERN = re.compile(r"(^|[ \t)])version=")
 
+# One item of a "shelly ... --json" listing
+JsonItem = dict[str, Any]
 
-def runQuiet(command: list[str], extraEnvironment: dict | None = None) -> str:
+
+def runQuiet(command: list[str], extraEnvironment: dict[str, str] | None = None) -> str:
     """stdout of a command, with stderr dropped and failures read as no output."""
     environment = {**os.environ, **extraEnvironment} if extraEnvironment else None
     try:
@@ -47,7 +53,7 @@ def runQuiet(command: list[str], extraEnvironment: dict | None = None) -> str:
         return ""
 
 
-def shellyJson(*arguments: str) -> list[dict]:
+def shellyJson(*arguments: str) -> list[JsonItem]:
     """The items of a "shelly ... --json" listing ([] on any failure).
     Shelly's plain output is a formatted table with headers, borders and
     "nothing to do" messages, so it is never parsed."""
@@ -58,12 +64,12 @@ def shellyJson(*arguments: str) -> list[dict]:
     return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
 
 
-def aurUpdateLines(items: list[dict]) -> list[str]:
+def aurUpdateLines(items: list[JsonItem]) -> list[str]:
     return [f"{item.get('Name', '?')} {item.get('Version', '?')} -> {item.get('NewVersion', '?')}"
             for item in items if item.get("Name")]
 
 
-def appimageUpdateLines(items: list[dict]) -> list[str]:
+def appimageUpdateLines(items: list[JsonItem]) -> list[str]:
     """Shelly lists AppImages with IsUpdateAvailable; Version is the new one."""
     return [f"{item['Name']} -> {item.get('Version') or '?'}"
             for item in items if item.get("Name") and item.get("IsUpdateAvailable", True)]
@@ -102,8 +108,8 @@ def findAppman() -> str | None:
     if candidate:
         return candidate
     binDir = Path(os.environ.get("XDG_BIN_HOME") or HOME_DIR / ".local/bin")
-    candidate = binDir / "appman"
-    return str(candidate) if os.access(candidate, os.X_OK) else None
+    appmanPath = binDir / "appman"
+    return str(appmanPath) if os.access(appmanPath, os.X_OK) else None
 
 
 def appmanAppsDir() -> Path | None:
@@ -152,10 +158,8 @@ def runAppmanProbe(probeScript: str, appDir: Path) -> tuple[str, str] | None:
     try:
         output, _ = process.communicate(timeout=APPMAN_PROBE_TIMEOUT)
     except subprocess.TimeoutExpired:
-        try:
+        with contextlib.suppress(OSError):
             os.killpg(process.pid, signal.SIGKILL)
-        except OSError:
-            pass
         process.communicate()
         return None
     if process.returncode != 0:
@@ -203,15 +207,15 @@ def checkAppman() -> list[str]:
 def checkAll(enabledKeys: set[str], skipDevel: bool) -> dict[str, list[str]]:
     """Run every enabled check in parallel and return {source key: update lines}.
     Shelly is called from a single thread, one call after another."""
-    results = {key: [] for key in ("repo", "aur", "flatpak", "appimage", "appman")}
+    results: dict[str, list[str]] = {key: [] for key in ("repo", "aur", "flatpak", "appimage", "appman")}
 
-    def runShellyChecks():
+    def runShellyChecks() -> None:
         if "aur" in enabledKeys:
             results["aur"] = checkAur(skipDevel)
         if "appimage" in enabledKeys:
             results["appimage"] = checkAppimage()
 
-    def runIndependentCheck(key, check):
+    def runIndependentCheck(key: str, check: Callable[[], list[str]]) -> None:
         if key in enabledKeys:
             results[key] = check()
 

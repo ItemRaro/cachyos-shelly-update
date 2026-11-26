@@ -112,7 +112,7 @@ class ShellyOutputTests(unittest.TestCase):
 
     def testRepositoriesNeverUseShelly(self):
         """Shelly's standard check syncs the real databases (pacman's lock)."""
-        with mock.patch.object(sources.shutil, "which", return_value=None), self.shellyPrints("x") as runQuiet:
+        with mock.patch("shellyupdate.sources.shutil.which", return_value=None), self.shellyPrints("x") as runQuiet:
             self.assertEqual(sources.checkRepo(), [])
         runQuiet.assert_not_called()
 
@@ -138,7 +138,8 @@ class AppmanProbeTests(unittest.TestCase):
 
     def testProbeStopsBeforeTheDownload(self):
         probe = sources.buildAppmanProbe(self.TEMPLATE)
-        self.assertIsNotNone(probe)
+        if probe is None:
+            self.fail("the template wasn't recognized")
         self.assertNotIn("wget", probe)
         self.assertNotIn('[ -n "$version" ]', probe)
         self.assertTrue(probe.rstrip().endswith('"$version0" "$version"'))
@@ -207,12 +208,17 @@ class CheckAllTests(unittest.TestCase):
         self.assertLess(elapsed, 1.3)
 
     def testDisabledSourcesAreNotChecked(self):
-        calls = []
-        with mock.patch.multiple(sources, checkRepo=lambda: calls.append("repo") or [],
-                                 checkAur=lambda _: calls.append("aur") or [],
-                                 checkAppimage=lambda: calls.append("appimage") or [],
-                                 checkFlatpak=lambda: calls.append("flatpak") or [],
-                                 checkAppman=lambda: calls.append("appman") or []):
+        calls: list[str] = []
+
+        def recordCall(key: str):
+            def check(*_: object) -> list[str]:
+                calls.append(key)
+                return []
+            return check
+
+        with mock.patch.multiple(sources, checkRepo=recordCall("repo"), checkAur=recordCall("aur"),
+                                 checkAppimage=recordCall("appimage"), checkFlatpak=recordCall("flatpak"),
+                                 checkAppman=recordCall("appman")):
             sources.checkAll({"aur", "flatpak"}, skipDevel=True)
         self.assertEqual(sorted(calls), ["aur", "flatpak"])
 
@@ -327,11 +333,11 @@ class TerminalTests(unittest.TestCase):
 class LockTests(unittest.TestCase):
     """Our single-instance lock: the timer skips, an interactive run waits."""
 
-    def holdLock(self, seconds):
+    def holdLock(self, seconds: float) -> None:
         import fcntl
-        holder = open(core.LOCK_FILE, "w")
+        holder = core.openLockFile(core.LOCK_FILE)
         fcntl.flock(holder, fcntl.LOCK_EX)
-        threading.Timer(seconds, holder.close).start()
+        threading.Timer(seconds, os.close, args=(holder,)).start()
 
     def testCheckSkipsRightAway(self):
         self.holdLock(1)
@@ -344,8 +350,9 @@ class LockTests(unittest.TestCase):
         self.holdLock(1)
         with mock.patch("sys.stdout"):
             lock = cli.acquireLock(10)
-        self.assertIsNotNone(lock)
-        lock.close()
+        if lock is None:
+            self.fail("the lock was never acquired")
+        os.close(lock)
 
     def testInteractiveRunGivesUp(self):
         self.holdLock(2)

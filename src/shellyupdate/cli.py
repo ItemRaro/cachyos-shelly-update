@@ -2,6 +2,7 @@
 the project's virtualenv Python, or on the system python3 when the venv is
 broken, so it must not need anything installed in the venv."""
 
+import contextlib
 import fcntl
 import io
 import os
@@ -58,7 +59,7 @@ def printTitle(message: str) -> None:
 
 
 class Options:
-    def __init__(self):
+    def __init__(self) -> None:
         self.mode = "update"            # update | check | list | tray
         self.assumeYes = False
         self.skipDevel = False
@@ -122,21 +123,21 @@ LOCK_WAIT_SECONDS = float(os.environ.get("CACHYOS_SHELLY_UPDATE_LOCK_TIMEOUT") o
 LOCK_RETRY_SECONDS = 0.5
 
 
-def acquireLock(waitSeconds: float = 0):
-    """The single-instance lock (our own, not pacman's), or None if another
-    run still holds it after waitSeconds. Python file descriptors aren't
-    inherited by child processes, so a leftover child can never keep the
-    lock after we exit."""
-    lockFile = open(core.LOCK_FILE, "w")
+def acquireLock(waitSeconds: float = 0) -> int | None:
+    """The single-instance lock (our own, not pacman's): a descriptor that
+    holds it until it is closed or we exit, or None if another run still
+    holds it after waitSeconds. Python file descriptors aren't inherited by
+    child processes, so a leftover child can never keep the lock after we exit."""
+    lockDescriptor = core.openLockFile(core.LOCK_FILE)
     deadline = time.monotonic() + waitSeconds
     announced = False
     while True:
         try:
-            fcntl.flock(lockFile, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return lockFile
+            fcntl.flock(lockDescriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return lockDescriptor
         except OSError:
             if time.monotonic() >= deadline:
-                lockFile.close()
+                os.close(lockDescriptor)
                 return None
         if not announced:
             printInfo("Waiting for the background check to finish...")
@@ -222,10 +223,8 @@ def main(selfPath: str, prefix: str, libDir: str, arguments: list[str]) -> int:
     def finish(exitCode: int) -> int:
         if options.waitAtExit:
             print()
-            try:
+            with contextlib.suppress(EOFError):
                 input("Press Enter to close...")
-            except EOFError:
-                pass
         return exitCode
 
     if options.mode == "tray":
