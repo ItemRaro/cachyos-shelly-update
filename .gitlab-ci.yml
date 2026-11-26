@@ -11,6 +11,8 @@
 #           installer  tests/cachy_update_handoff.sh checks install.sh turning
 #                      cachy-update off and back on; tests/installer_tools.sh
 #                      the optional tools (yay, Flatpak + Flathub, AppMan)
+#           self_update tests/self_update.sh updates every earlier release
+#                      to this tree and compares it with a fresh install
 #           tray       tests/tray_smoke.py builds the PyQt6 tray headless
 #
 # Runners: bash/data jobs on the shared shell runner (tags: docker,
@@ -61,7 +63,7 @@ shellcheck:
   cache: []
   script:
     - shellcheck --version
-    - shellcheck install.sh tests/*.sh
+    - shellcheck install.sh tests/*.sh src/cachyos-shelly-update
 
 ruff:
   extends: .python
@@ -114,6 +116,21 @@ installer:
   script:
     - bash tests/cachy_update_handoff.sh
     - bash tests/installer_tools.sh
+
+# Every earlier release (found in git history) installs itself and updates
+# to this tree with its own "install.sh update"; the result must equal a
+# fresh install. Needs the full history and real python3/git/procps; runs
+# the installer as a throwaway user (the job runs as root).
+self_update:
+  extends: .python
+  stage: test
+  needs: [shellcheck]
+  cache: []
+  variables:
+    GIT_DEPTH: '0'
+  script:
+    - python --version
+    - bash tests/self_update.sh
 
 tray:
   extends: .python

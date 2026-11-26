@@ -1,19 +1,35 @@
-#!/usr/bin/env -S python3 -I -S
+#!/bin/sh
 # cachyos-shelly-update launcher. Installed in /opt/cachyos-shelly-update/bin
-# (linked from /usr/local/bin) with the code in ../lib/shellyupdate; when
-# run from the repository, the code sits next to it in src/shellyupdate.
+# (linked from /usr/local/bin) with the code in ../lib/shellyupdate; when run
+# from the repository, the code sits next to it in src/shellyupdate.
+#
+# The CLI and the tray share one Python: the project's virtualenv
+# (/opt/cachyos-shelly-update/.venv). If its interpreter is gone (a failed
+# or half-done rebuild, a removed Python), the system python3 is used: the
+# CLI only needs the standard library, so the hourly check keeps working.
+# After a Python minor upgrade the venv's python is the new system Python
+# (it links to /usr/bin/python3), which runs the CLI fine until the pacman
+# hook rebuilds the venv for the tray.
+#
 # -I -S: ignore PYTHON* variables, the user's site-packages and site itself.
 # Only the standard library is needed, and it starts faster.
-import os
+self=$(readlink -f -- "$0") || exit 1
+binDir=${self%/*}
+prefix=${binDir%/*}
+if [ -n "${CACHYOS_SHELLY_UPDATE_LIBDIR:-}" ]; then
+    libDir=$CACHYOS_SHELLY_UPDATE_LIBDIR
+elif [ -d "$binDir/shellyupdate" ]; then
+    libDir=$binDir
+else
+    libDir=$prefix/lib
+fi
+python=$prefix/.venv/bin/python
+[ -x "$python" ] || python=python3
+
+exec "$python" -I -S -c '
 import sys
-
-selfPath = os.path.realpath(__file__)
-binDir = os.path.dirname(selfPath)
-prefix = os.path.dirname(binDir)
-libDir = os.environ.get("CACHYOS_SHELLY_UPDATE_LIBDIR") or (
-    binDir if os.path.isdir(os.path.join(binDir, "shellyupdate")) else os.path.join(prefix, "lib"))
+selfPath, prefix, libDir = sys.argv[1:4]
 sys.path.insert(0, libDir)
-
-from shellyupdate import cli  # noqa: E402
-
-sys.exit(cli.main(selfPath, prefix, libDir, sys.argv[1:]))
+from shellyupdate import cli
+sys.exit(cli.main(selfPath, prefix, libDir, sys.argv[4:]))
+' "$self" "$prefix" "$libDir" "$@"

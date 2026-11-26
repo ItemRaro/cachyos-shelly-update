@@ -37,7 +37,7 @@ If you start an update while a background check is running, it waits for the che
 
 ### Performance
 
-The sources are checked in parallel (Shelly's own calls stay one after another), so a check takes about as long as the slowest source instead of the sum of all of them. The code is precompiled at install time and the CLI starts Python without `site` (`python3 -I -S`), so the timer's check costs little more than the commands it runs.
+The sources are checked in parallel (Shelly's own calls stay one after another), so a check takes about as long as the slowest source instead of the sum of all of them. The code is precompiled at install time and the CLI starts Python without `site` (`-I -S`), so the timer's check costs little more than the commands it runs.
 
 AppMan is skipped when it isn't installed or has never been set up (no `~/.config/appman/appman-config`). Use `--no-appman` to turn it off.
 
@@ -59,7 +59,7 @@ The installer:
 3. Asks to install **Flatpak** with Shelly's Flatpak backend and the **Flathub** remote when they're missing.
 4. Asks to install **AppMan** in `~/.local/bin/appman` if you don't have it, the same way AppMan's own installer does. It isn't configured: the first `appman -i <app>` asks where to keep apps.
 5. Copies the files to **`/opt/cachyos-shelly-update`**. The installation doesn't depend on the repository, so the clone can be deleted afterwards.
-6. Creates a private Python virtualenv in `/opt/cachyos-shelly-update/.venv` with the tray's dependency (PyQt6, pinned in `requirements.txt`), so nothing is added to the system Python. The updater itself only needs the standard library and runs on the system's `python3`. A pacman hook rebuilds the virtualenv and the precompiled code when the `python` package moves to a new version.
+6. Creates the project's Python virtualenv in `/opt/cachyos-shelly-update/.venv` with the tray's dependency (PyQt6, pinned in `requirements.txt`), so nothing is added to the system Python. The command and the tray both run on it. The command only needs the standard library, so if the virtualenv is ever broken (its Python gone, a rebuild that failed) it runs on the system `python3` instead, and the hourly check keeps working. A pacman hook rebuilds the virtualenv and the precompiled code when the `python` package moves to a new version.
 7. Creates the `/usr/local/bin/cachyos-shelly-update` link, the app menu entry, the tray autostart and the systemd user timer.
 8. Turns cachy-update off, so you don't get two tray icons and two checks: its timer (per user or for all users), its tray at login and the running tray. The package and its files stay untouched; the tray is switched off for your user with an `~/.config/autostart/arch-update-tray.desktop` file containing `Hidden=true` (your own copy of that file, if any, is backed up). What was on is recorded.
 
@@ -74,6 +74,8 @@ The installer:
 ```
 
 `update` uses the `origin` URL saved at install time. To change it, run it with `CACHYOS_SHELLY_UPDATE_REPO=<url>`. If you run `update` from inside a clone, it does a `git pull` and reinstalls.
+
+Any installed version can update to the latest one: the installed `install.sh` downloads the new version and runs the new installer, which turns whatever layout an older version left into exactly what a fresh install gives. Files the new version no longer installs are removed (the installer keeps a list of what it put where, in `/opt/cachyos-shelly-update/installed-files`), the virtualenv is rebuilt only when `requirements.txt` or the Python version changed, the code is recompiled, the systemd units are reloaded and the running tray is restarted on the new code, in its own session, even when the update runs from a TTY, SSH or `sudo`. Your settings, state and the installer's records are kept. CI checks this for every earlier release (`tests/self_update.sh`).
 
 Uninstalling always removes the virtualenv with everything else in `/opt/cachyos-shelly-update`. If cachy-update was on before the install, it asks whether to turn it back on (default: yes) and restores exactly what was on, including your own autostart file. With `--purge` it also offers to remove what the installer added: only the packages it installed itself (each one is kept if another package still needs it) and AppMan, if it downloaded it. Apps you installed with AppMan are never touched.
 
@@ -104,7 +106,7 @@ systemctl --user edit cachyos-shelly-update.timer
 install.sh                         install / update / uninstall / status
 VERSION                            bump on every release (update compares against it)
 requirements.txt                   the tray's Python dependencies (pinned)
-src/cachyos-shelly-update          launcher (python3, standard library only)
+src/cachyos-shelly-update          launcher (sh): the venv's Python, or python3 if the venv is broken
 src/shellyupdate/                  the Python package:
   core.py                          paths, sources, state files and texts shared by the CLI and the tray
   sources.py                       the update checks (repositories, AUR, Flatpak, AppImage, AppMan)
@@ -121,16 +123,18 @@ docs/pt-BR/                        Portuguese documentation
 The GitLab pipeline runs on every merge request and every push to `main`:
 
 - **lint**: `shellcheck` on `install.sh` and the test scripts, `ruff` on the Python (rules in `ruff.toml`), and validation of the `.desktop` files and the systemd units.
-- **test**: `tests/test_units.py` tests the package's pieces (the AppMan probe and its timeout, the parallel checks, options, icons, the terminal lookup). `tests/smoke.sh` runs the real updater against fake `shelly` and `appman` commands, with a temporary HOME and no sudo, including AppMan apps built from each template layout. `tests/cachy_update_handoff.sh` checks that installing turns cachy-update off and uninstalling turns back on exactly what was on, with fake `systemctl`. `tests/tray_smoke.py` builds the tray and its menu without a display, and checks that "Run" opens the KDE default terminal.
+- **test**: `tests/test_units.py` tests the package's pieces (the AppMan probe and its timeout, the parallel checks, options, icons, the terminal lookup). `tests/smoke.sh` runs the real updater against fake `shelly` and `appman` commands, with a temporary HOME and no sudo, including AppMan apps built from each template layout. `tests/cachy_update_handoff.sh` checks that installing turns cachy-update off and uninstalling turns back on exactly what was on, with fake `systemctl`; `tests/installer_tools.sh` checks the optional tools (yay, Flatpak + Flathub, AppMan). `tests/self_update.sh` installs every earlier release from git history, updates it with its own `install.sh update` and checks the result equals a fresh install (files, venv, units, tray restart, state), plus the launcher's fallback to `python3`. `tests/tray_smoke.py` builds the tray and its menu without a display, and checks that "Run" opens the KDE default terminal.
 
 To run them locally:
 
 ```bash
-shellcheck install.sh tests/*.sh
+shellcheck install.sh tests/*.sh src/cachyos-shelly-update
 ruff check .
 PYTHONPATH=src python -m unittest discover -s tests -p "test_*.py"
 bash tests/smoke.sh
 bash tests/cachy_update_handoff.sh
+bash tests/installer_tools.sh
+bash tests/self_update.sh         # in a container: it runs as a throwaway user when root
 pip install -r requirements.txt
 PYTHONPATH=src QT_QPA_PLATFORM=offscreen python tests/tray_smoke.py
 ```
@@ -139,7 +143,7 @@ PYTHONPATH=src QT_QPA_PLATFORM=offscreen python tests/tray_smoke.py
 
 | Path | Contents |
 |---|---|
-| `/opt/cachyos-shelly-update/` | the program, `install.sh`, `VERSION`, `REPO`, the `.venv` virtualenv |
+| `/opt/cachyos-shelly-update/` | the program, `install.sh`, `VERSION`, `REPO`, the `.venv` virtualenv, `installed-files` (what the installer put where) |
 | `/usr/local/bin/cachyos-shelly-update` | link to the command |
 | `/usr/local/share/applications/cachyos-shelly-update.desktop` | app menu entry |
 | `/etc/xdg/autostart/cachyos-shelly-update-tray.desktop` | tray at session start |
