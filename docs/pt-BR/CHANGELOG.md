@@ -9,6 +9,28 @@ e o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-11-26
+
+### Alterado
+- Um virtualenv só para o projeto todo: o comando também roda no Python de
+  `/opt/cachyos-shelly-update/.venv`, não só a bandeja. Se o virtualenv
+  quebrar (o Python dele sumiu, uma reconstrução falhou), o comando volta
+  para o `python3` do sistema, então a verificação de hora em hora nunca
+  para. O lançador agora é um pequeno script `sh`. O `install.sh status`
+  mostra em qual Python o comando roda.
+
+### Corrigido
+- Atualizar a partir de qualquer versão anterior agora sempre termina
+  exatamente como uma instalação nova, e o CI prova isso para cada versão
+  (`tests/self_update.sh`):
+  - o instalador registra o que instala (`installed-files`) e remove o que
+    uma versão mais nova não instala mais, também na remoção;
+  - a bandeja em execução é reiniciada com o código novo na sessão dela
+    mesmo quando o update roda de um TTY, SSH ou `sudo`; antes, só um update
+    iniciado de um terminal dentro do desktop a reiniciava, e uma bandeja
+    antiga continuava rodando com código apagado.
+
+
 ## [2.1.0] - 2026-11-25
 
 ### Corrigido
@@ -146,7 +168,8 @@ e o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 - Ícone de bandeja em PyQt6 com os ícones do cachy-update.
 - `install.sh` com install, update, uninstall e status.
 
-[Unreleased]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v2.1.0...main
+[Unreleased]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v2.2.0...main
+[2.2.0]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v2.1.0...v2.2.0
 [2.1.0]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v2.0.0...v2.1.0
 [2.0.0]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v1.2.0...v2.0.0
 [1.2.0]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v1.1.0...v1.2.0

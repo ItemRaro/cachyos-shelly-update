@@ -39,7 +39,7 @@ Se você começar uma atualização enquanto uma verificação roda em segundo p
 
 ### Desempenho
 
-As origens são verificadas em paralelo (as chamadas do Shelly continuam uma depois da outra), então uma verificação demora mais ou menos o tempo da origem mais lenta, e não a soma de todas. O código é pré-compilado na instalação e o CLI inicia o Python sem o `site` (`python3 -I -S`), então a verificação do timer custa pouco mais que os comandos que ela roda.
+As origens são verificadas em paralelo (as chamadas do Shelly continuam uma depois da outra), então uma verificação demora mais ou menos o tempo da origem mais lenta, e não a soma de todas. O código é pré-compilado na instalação e o CLI inicia o Python sem o `site` (`-I -S`), então a verificação do timer custa pouco mais que os comandos que ela roda.
 
 O AppMan é ignorado quando não está instalado ou nunca foi configurado (sem `~/.config/appman/appman-config`). Use `--no-appman` para desligá-lo.
 
@@ -61,7 +61,7 @@ O instalador:
 3. Pergunta se é para instalar o **Flatpak** com o backend de Flatpak do Shelly e o repositório **Flathub** quando faltarem.
 4. Pergunta se é para instalar o **AppMan** em `~/.local/bin/appman` se você não tiver, do mesmo jeito que o instalador oficial dele. Ele não é configurado: o primeiro `appman -i <app>` pergunta onde guardar os apps.
 5. Copia os arquivos para **`/opt/cachyos-shelly-update`**. A instalação não depende do repositório, então o clone pode ser apagado depois.
-6. Cria um virtualenv Python próprio em `/opt/cachyos-shelly-update/.venv` com a dependência da bandeja (PyQt6, fixada no `requirements.txt`), sem instalar nada no Python do sistema. O atualizador em si só usa a biblioteca padrão e roda no `python3` do sistema. Um hook do pacman reconstrói o virtualenv e o código pré-compilado quando o pacote `python` muda de versão.
+6. Cria o virtualenv Python do projeto em `/opt/cachyos-shelly-update/.venv` com a dependência da bandeja (PyQt6, fixada no `requirements.txt`), sem instalar nada no Python do sistema. O comando e a bandeja rodam nele. O comando só usa a biblioteca padrão, então se o virtualenv quebrar (o Python dele sumiu, uma reconstrução falhou) ele roda no `python3` do sistema, e a verificação de hora em hora continua funcionando. Um hook do pacman reconstrói o virtualenv e o código pré-compilado quando o pacote `python` muda de versão.
 7. Cria o link `/usr/local/bin/cachyos-shelly-update`, o atalho no menu de aplicativos, o autostart da bandeja e o timer do systemd de usuário.
 8. Desliga o cachy-update, para não ficar com dois ícones na bandeja e duas verificações: o timer dele (do usuário ou de todos os usuários), a bandeja no login e a bandeja que estiver rodando. O pacote e os arquivos dele não são mexidos; a bandeja é desligada para o seu usuário com um arquivo `~/.config/autostart/arch-update-tray.desktop` contendo `Hidden=true` (se você já tinha esse arquivo, ele é guardado). O que estava ligado fica registrado.
 
@@ -76,6 +76,8 @@ O instalador:
 ```
 
 O `update` usa a URL do `origin` gravada na instalação. Para trocar a origem, rode com `CACHYOS_SHELLY_UPDATE_REPO=<url>`. Se você rodar o `update` de dentro de um clone, ele faz `git pull` e reinstala.
+
+Qualquer versão instalada consegue atualizar para a mais recente: o `install.sh` instalado baixa a versão nova e roda o instalador novo, que transforma o que uma versão antiga deixou exatamente no que uma instalação nova daria. Arquivos que a versão nova não instala mais são removidos (o instalador guarda a lista do que pôs onde, em `/opt/cachyos-shelly-update/installed-files`), o virtualenv só é reconstruído quando o `requirements.txt` ou a versão do Python mudaram, o código é recompilado, as unidades do systemd são recarregadas e a bandeja em execução é reiniciada com o código novo, na sessão dela, mesmo quando o update roda de um TTY, SSH ou `sudo`. Suas configurações, o estado e os registros do instalador são mantidos. O CI confere isso para cada versão anterior (`tests/self_update.sh`).
 
 A remoção sempre apaga o virtualenv junto com o resto de `/opt/cachyos-shelly-update`. Se o cachy-update estava ligado antes da instalação, ela pergunta se é para religá-lo (padrão: sim) e restaura exatamente o que estava ligado, inclusive o seu arquivo de autostart. Com `--purge`, ela também oferece remover o que o instalador adicionou: só os pacotes que ele mesmo instalou (cada um fica se outro pacote ainda precisar dele) e o AppMan, se foi ele que baixou. Os apps que você instalou com o AppMan nunca são mexidos.
 
@@ -106,7 +108,7 @@ systemctl --user edit cachyos-shelly-update.timer
 install.sh                         instalar / atualizar / remover / status
 VERSION                            aumente a cada release (o update compara com isto)
 requirements.txt                   dependências Python da bandeja (fixadas)
-src/cachyos-shelly-update          lançador (python3, só biblioteca padrão)
+src/cachyos-shelly-update          lançador (sh): o Python do venv, ou o python3 se o venv quebrar
 src/shellyupdate/                  o pacote Python:
   core.py                          caminhos, origens, arquivos de estado e textos usados pelo CLI e pela bandeja
   sources.py                       as verificações (repositórios, AUR, Flatpak, AppImage, AppMan)
@@ -123,16 +125,18 @@ docs/pt-BR/                        documentação em português
 O pipeline do GitLab roda em todo merge request e em todo push na `main`:
 
 - **lint**: `shellcheck` no `install.sh` e nos scripts de teste, `ruff` no Python (regras em `ruff.toml`) e validação dos `.desktop` e das unidades systemd.
-- **test**: `tests/test_units.py` testa as partes do pacote (a sonda do AppMan e o limite de tempo, as verificações em paralelo, opções, ícones, a busca do terminal). `tests/smoke.sh` roda o atualizador de verdade contra um `shelly` e um `appman` falsos, com HOME temporário e sem sudo, incluindo apps do AppMan em cada formato de modelo. `tests/cachy_update_handoff.sh` confere, com um `systemctl` falso, que a instalação desliga o cachy-update e que a remoção religa exatamente o que estava ligado. `tests/tray_smoke.py` monta a bandeja e o menu sem tela, e confere que "Run" abre o terminal padrão do KDE.
+- **test**: `tests/test_units.py` testa as partes do pacote (a sonda do AppMan e o limite de tempo, as verificações em paralelo, opções, ícones, a busca do terminal). `tests/smoke.sh` roda o atualizador de verdade contra um `shelly` e um `appman` falsos, com HOME temporário e sem sudo, incluindo apps do AppMan em cada formato de modelo. `tests/cachy_update_handoff.sh` confere, com um `systemctl` falso, que a instalação desliga o cachy-update e que a remoção religa exatamente o que estava ligado; `tests/installer_tools.sh` confere as ferramentas opcionais (yay, Flatpak + Flathub, AppMan). `tests/self_update.sh` instala cada versão anterior do histórico do git, atualiza com o próprio `install.sh update` dela e confere que o resultado é igual a uma instalação nova (arquivos, venv, unidades, reinício da bandeja, estado), além do fallback do lançador para o `python3`. `tests/tray_smoke.py` monta a bandeja e o menu sem tela, e confere que "Run" abre o terminal padrão do KDE.
 
 Para rodar localmente:
 
 ```bash
-shellcheck install.sh tests/*.sh
+shellcheck install.sh tests/*.sh src/cachyos-shelly-update
 ruff check .
 PYTHONPATH=src python -m unittest discover -s tests -p "test_*.py"
 bash tests/smoke.sh
 bash tests/cachy_update_handoff.sh
+bash tests/installer_tools.sh
+bash tests/self_update.sh         # num container: como root, roda com um usuário descartável
 pip install -r requirements.txt
 PYTHONPATH=src QT_QPA_PLATFORM=offscreen python tests/tray_smoke.py
 ```
@@ -141,7 +145,7 @@ PYTHONPATH=src QT_QPA_PLATFORM=offscreen python tests/tray_smoke.py
 
 | Caminho | Conteúdo |
 |---|---|
-| `/opt/cachyos-shelly-update/` | programa, `install.sh`, `VERSION`, `REPO`, o virtualenv `.venv` |
+| `/opt/cachyos-shelly-update/` | programa, `install.sh`, `VERSION`, `REPO`, o virtualenv `.venv`, `installed-files` (o que o instalador pôs onde) |
 | `/usr/local/bin/cachyos-shelly-update` | link para o comando |
 | `/usr/local/share/applications/cachyos-shelly-update.desktop` | atalho no menu |
 | `/etc/xdg/autostart/cachyos-shelly-update-tray.desktop` | bandeja ao iniciar a sessão |
