@@ -9,6 +9,36 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-11-25
+
+### Changed
+- The updater is rewritten in Python (standard library only, run by the
+  system's `python3`); `install.sh` stays in bash. Commands, options, the
+  config file, the state files, the systemd units and the tray are the same,
+  so a 1.x install upgrades in place.
+- The CLI and the tray share one package (`shellyupdate`): sources, state
+  files, texts and icons are defined once.
+- The sources are checked in parallel, and AppMan apps 8 at a time. Shelly's
+  own calls still run one after another. With network-like delays a check
+  went from 7.6 s to 2.1 s in a benchmark; with instant sources both take
+  about 0.1 s.
+- The code is precompiled at install time, and the pacman hook recompiles it
+  after Python upgrades.
+
+### Added
+- The tray opens the updater in the user's default terminal emulator: the
+  KDE Plasma setting, `xdg-terminal-exec`, `$TERMINAL` or
+  `x-terminal-emulator`, before a list of known terminals.
+  `CACHYOS_SHELLY_UPDATE_TERMINAL` still overrides it.
+- Unit tests for the package (`tests/test_units.py`), next to the 1.x smoke
+  tests, which still run unchanged against the new code.
+
+### Fixed
+- The tray opened the first terminal it found (e.g. Alacritty) instead of
+  the one set as default (e.g. Ghostty).
+- An AppMan check that timed out now also stops what it started (a stuck
+  `curl`), not just its shell.
+
 ## [1.2.0] - 2026-11-25
 
 ### Changed
@@ -84,7 +114,8 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - PyQt6 tray icon using cachy-update's icons.
 - `install.sh` with install, update, uninstall and status.
 
-[Unreleased]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v1.2.0...main
+[Unreleased]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v2.0.0...main
+[2.0.0]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v1.2.0...v2.0.0
 [1.2.0]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v1.1.0...v1.2.0
 [1.1.0]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v1.0.0...v1.1.0
 [1.0.0]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/tags/v1.0.0

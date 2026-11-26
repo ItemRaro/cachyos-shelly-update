@@ -9,14 +9,29 @@ Atualizador no estilo do [cachy-update](https://github.com/CachyOS/cachy-update)
 - **`cachyos-shelly-update`** lista as atualizações separadas por origem, pergunta, roda `shelly upgrade all` e depois `appman -u`. Em seguida mostra os `.pacnew` pendentes e os pacotes órfãos, e avisa se o kernel mudou.
 - **Verificação automática**: um timer do systemd roda `cachyos-shelly-update --check` 2 min após o login e depois a cada 6 h. Quando surge atualização nova, aparece uma notificação.
 - **Bandeja**: usa os mesmos ícones do cachy-update e respeita o `TrayIconStyle` do `arch-update.conf`.
-  - Clique esquerdo abre o atualizador no terminal.
+  - Clique esquerdo abre o atualizador no seu emulador de terminal padrão (veja [Terminal](#terminal)).
   - Clique direito mostra as atualizações por origem, a última e a próxima verificação, e as opções "Check for updates" e "Quit".
 
 As mensagens do programa são em inglês; os atalhos do menu e da bandeja aparecem em português.
 
 ### AppMan
 
-O AppMan não tem um comando "só verificar": o `appman -u` já baixa tudo. Para listar as atualizações do AppMan sem aplicar, o cachyos-shelly-update roda só a primeira parte do script `AM-updater` de cada app, a que lê a versão instalada e pergunta a última versão para a origem, e para antes do download. Isso funciona com os scripts gerados pelos modelos do AppMan (hoje, 10.204 dos 10.206 apps do catálogo). Apps com scripts fora desse padrão ficam fora da lista, mas continuam sendo atualizados pelo `appman -u`. Cada verificação tem limite de 30 segundos (`CACHYOS_SHELLY_UPDATE_PROBE_TIMEOUT`).
+O AppMan não tem um comando "só verificar": o `appman -u` já baixa tudo. Para listar as atualizações do AppMan sem aplicar, o cachyos-shelly-update roda só a primeira parte do script `AM-updater` de cada app, a que lê a versão instalada e pergunta a última versão para a origem, e para antes do download. Isso funciona com os scripts gerados pelos modelos do AppMan (hoje, 10.204 dos 10.206 apps do catálogo). Apps com scripts fora desse padrão ficam fora da lista, mas continuam sendo atualizados pelo `appman -u`. Os apps são verificados 8 por vez, cada um com limite de 30 segundos (`CACHYOS_SHELLY_UPDATE_PROBE_TIMEOUT`); uma verificação que estoura o tempo é encerrada junto com tudo o que ela iniciou.
+
+### Terminal
+
+A bandeja abre o atualizador no emulador de terminal que você usa, procurado nesta ordem:
+
+1. `CACHYOS_SHELLY_UPDATE_TERMINAL`, se definido (ex.: `kitty --single-instance`)
+2. no KDE Plasma, o escolhido em Configurações do Sistema > Aplicativos padrão > Emulador de terminal
+3. `xdg-terminal-exec`, o lançador de terminal padrão do freedesktop (GNOME, Hyprland e outros)
+4. `$TERMINAL`
+5. `x-terminal-emulator`
+6. o primeiro instalado entre Konsole, Ghostty, kitty, Alacritty, foot, WezTerm, Ptyxis, Console, GNOME Terminal, Xfce Terminal e xterm
+
+### Desempenho
+
+As origens são verificadas em paralelo (as chamadas do Shelly continuam uma depois da outra), então uma verificação demora mais ou menos o tempo da origem mais lenta, e não a soma de todas. O código é pré-compilado na instalação e o CLI inicia o Python sem o `site` (`python3 -I -S`), então a verificação do timer custa pouco mais que os comandos que ela roda.
 
 O AppMan é ignorado quando não está instalado ou nunca foi configurado (sem `~/.config/appman/appman-config`). Use `--no-appman` para desligá-lo.
 
@@ -36,7 +51,7 @@ O instalador:
    Primeiro procura nos repositórios (o CachyOS já tem o Shelly). Se um pacote não estiver lá e o **yay** estiver instalado, usa a versão `-bin` do AUR. Pacotes que só *fornecem* a dependência, como o `shelly-bin`, também contam.
 2. Instala o **AppMan** em `~/.local/bin/appman` se você não tiver, do mesmo jeito que o instalador oficial dele. Ele não é configurado: o primeiro `appman -i <app>` pergunta onde guardar os apps.
 3. Copia os arquivos para **`/opt/cachyos-shelly-update`**. A instalação não depende do repositório, então o clone pode ser apagado depois.
-4. Cria um virtualenv Python próprio em `/opt/cachyos-shelly-update/.venv` com a dependência da bandeja (PyQt6, fixada no `requirements.txt`), sem instalar nada no Python do sistema. Um hook do pacman reconstrói o virtualenv quando o pacote `python` muda de versão.
+4. Cria um virtualenv Python próprio em `/opt/cachyos-shelly-update/.venv` com a dependência da bandeja (PyQt6, fixada no `requirements.txt`), sem instalar nada no Python do sistema. O atualizador em si só usa a biblioteca padrão e roda no `python3` do sistema. Um hook do pacman reconstrói o virtualenv e o código pré-compilado quando o pacote `python` muda de versão.
 5. Cria o link `/usr/local/bin/cachyos-shelly-update`, o atalho no menu de aplicativos, o autostart da bandeja e o timer do systemd de usuário.
 6. Desliga o cachy-update, para não ficar com dois ícones na bandeja e duas verificações: o timer dele (do usuário ou de todos os usuários), a bandeja no login e a bandeja que estiver rodando. O pacote e os arquivos dele não são mexidos; a bandeja é desligada para o seu usuário com um arquivo `~/.config/autostart/arch-update-tray.desktop` contendo `Hidden=true` (se você já tinha esse arquivo, ele é guardado). O que estava ligado fica registrado.
 
@@ -81,8 +96,13 @@ systemctl --user edit cachyos-shelly-update.timer
 install.sh                         instalar / atualizar / remover / status
 VERSION                            aumente a cada release (o update compara com isto)
 requirements.txt                   dependências Python da bandeja (fixadas)
-src/cachyos-shelly-update          script principal (bash)
-src/cachyos-shelly-update-tray.py  ícone da bandeja (PyQt6)
+src/cachyos-shelly-update          lançador (python3, só biblioteca padrão)
+src/shellyupdate/                  o pacote Python:
+  core.py                          caminhos, origens, arquivos de estado e textos usados pelo CLI e pela bandeja
+  sources.py                       as verificações (repositórios, AUR, Flatpak, AppImage, AppMan)
+  cli.py                           o atualizador de linha de comando
+  terminal.py                      encontra o emulador de terminal padrão
+  tray.py                          ícone da bandeja (PyQt6)
 data/                              .desktop, unidades systemd, hook do pacman e exemplo de config
 tests/                             testes rodados no CI (não mexem no sistema)
 docs/pt-BR/                        documentação em português
@@ -92,18 +112,19 @@ docs/pt-BR/                        documentação em português
 
 O pipeline do GitLab roda em todo merge request e em todo push na `main`:
 
-- **lint**: `shellcheck` nos scripts bash, `ruff` no Python (regras em `ruff.toml`) e validação dos `.desktop` e das unidades systemd.
-- **test**: `tests/smoke.sh` roda o atualizador de verdade contra um `shelly` e um `appman` falsos, com HOME temporário e sem sudo, incluindo apps do AppMan em cada formato de modelo. `tests/cachy_update_handoff.sh` confere, com um `systemctl` falso, que a instalação desliga o cachy-update e que a remoção religa exatamente o que estava ligado. `tests/tray_smoke.py` monta a bandeja e o menu sem tela.
+- **lint**: `shellcheck` no `install.sh` e nos scripts de teste, `ruff` no Python (regras em `ruff.toml`) e validação dos `.desktop` e das unidades systemd.
+- **test**: `tests/test_units.py` testa as partes do pacote (a sonda do AppMan e o limite de tempo, as verificações em paralelo, opções, ícones, a busca do terminal). `tests/smoke.sh` roda o atualizador de verdade contra um `shelly` e um `appman` falsos, com HOME temporário e sem sudo, incluindo apps do AppMan em cada formato de modelo. `tests/cachy_update_handoff.sh` confere, com um `systemctl` falso, que a instalação desliga o cachy-update e que a remoção religa exatamente o que estava ligado. `tests/tray_smoke.py` monta a bandeja e o menu sem tela, e confere que "Run" abre o terminal padrão do KDE.
 
 Para rodar localmente:
 
 ```bash
-shellcheck install.sh src/cachyos-shelly-update tests/*.sh
+shellcheck install.sh tests/*.sh
+ruff check .
+PYTHONPATH=src python -m unittest discover -s tests -p "test_*.py"
 bash tests/smoke.sh
 bash tests/cachy_update_handoff.sh
-ruff check .
 pip install -r requirements.txt
-QT_QPA_PLATFORM=offscreen python tests/tray_smoke.py
+PYTHONPATH=src QT_QPA_PLATFORM=offscreen python tests/tray_smoke.py
 ```
 
 ## Arquivos instalados

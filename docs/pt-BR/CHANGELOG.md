@@ -9,6 +9,36 @@ e o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-11-25
+
+### Alterado
+- O atualizador foi reescrito em Python (só biblioteca padrão, rodando no
+  `python3` do sistema); o `install.sh` continua em bash. Comandos, opções,
+  arquivo de configuração, arquivos de estado, unidades systemd e bandeja
+  são os mesmos, então uma instalação 1.x atualiza sem mudanças.
+- O CLI e a bandeja usam um pacote só (`shellyupdate`): origens, arquivos de
+  estado, textos e ícones são definidos uma vez.
+- As origens são verificadas em paralelo, e os apps do AppMan 8 por vez. As
+  chamadas do Shelly continuam uma depois da outra. Com atrasos parecidos com
+  os da rede, uma verificação caiu de 7,6 s para 2,1 s num benchmark; com
+  origens instantâneas, as duas levam cerca de 0,1 s.
+- O código é pré-compilado na instalação, e o hook do pacman o recompila
+  depois de atualizações do Python.
+
+### Adicionado
+- A bandeja abre o atualizador no emulador de terminal padrão do usuário: o
+  configurado no KDE Plasma, o `xdg-terminal-exec`, o `$TERMINAL` ou o
+  `x-terminal-emulator`, antes de uma lista de terminais conhecidos. O
+  `CACHYOS_SHELLY_UPDATE_TERMINAL` continua tendo prioridade.
+- Testes de unidade do pacote (`tests/test_units.py`), junto com os testes
+  de fumaça da 1.x, que continuam rodando sem mudanças contra o código novo.
+
+### Corrigido
+- A bandeja abria o primeiro terminal que encontrava (ex.: Alacritty), e não
+  o configurado como padrão (ex.: Ghostty).
+- Uma verificação do AppMan que estoura o tempo agora encerra também o que
+  ela iniciou (um `curl` travado), e não só o shell dela.
+
 ## [1.2.0] - 2026-11-25
 
 ### Alterado
@@ -87,7 +117,8 @@ e o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 - Ícone de bandeja em PyQt6 com os ícones do cachy-update.
 - `install.sh` com install, update, uninstall e status.
 
-[Unreleased]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v1.2.0...main
+[Unreleased]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v2.0.0...main
+[2.0.0]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v1.2.0...v2.0.0
 [1.2.0]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v1.1.0...v1.2.0
 [1.1.0]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v1.0.0...v1.1.0
 [1.0.0]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/tags/v1.0.0
