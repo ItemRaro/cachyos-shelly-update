@@ -29,6 +29,10 @@ readonly USER_UNIT_DIR=/etc/systemd/user
 readonly PACMAN_HOOK=/etc/pacman.d/hooks/$APP_NAME-venv.hook
 # The tray's Python dependencies (PyQt6) live here, not in the system
 readonly VENV_DIR=$PREFIX/.venv
+# The Python package (CLI + tray) is installed here
+readonly LIB_DIR=$PREFIX/lib
+# Matches our tray process: 2.x runs "-m shellyupdate.tray", 1.x ran the .py file
+readonly TRAY_PROCESS_PATTERN="shellyupdate\\.tray|$APP_NAME-tray\\.py"
 # Packages this installer added, so --purge can offer to remove them
 readonly INSTALLED_PACKAGES_FILE=$PREFIX/installed-packages
 # Set when this installer downloaded AppMan (holds its path)
@@ -242,12 +246,26 @@ ensureVenv() {
 }
 
 # ---------- files ----------
+# Precompile the package: users can't write to /opt, so without this every
+# run (the timer's too) would compile it again in memory. Bytecode for an
+# older Python is dropped first; the pacman hook calls this after upgrades.
+compileBytecode() {
+    [[ -d $LIB_DIR/shellyupdate ]] || return 0
+    asRoot rm -rf "$LIB_DIR/shellyupdate/__pycache__"
+    asRoot python3 -m compileall -q "$LIB_DIR/shellyupdate" >/dev/null \
+        || printWarning "could not precompile $LIB_DIR (it still works, just starts slower)"
+}
+
 installFiles() {
     printInfo "Installing into $PREFIX"
     [[ -f $SOURCE_DIR/src/$APP_NAME ]] || die "Project files not found in $SOURCE_DIR/src (run install from the repository)."
 
     asRoot install -Dm755 "$SOURCE_DIR/src/$APP_NAME"                "$PREFIX/bin/$APP_NAME"
-    asRoot install -Dm755 "$SOURCE_DIR/src/$APP_NAME-tray.py"        "$PREFIX/lib/$APP_NAME-tray.py"
+    # A clean package directory: drops modules and bytecode of older versions,
+    # and 1.x's single tray file
+    asRoot rm -rf "$LIB_DIR"
+    asRoot install -Dm644 -t "$LIB_DIR/shellyupdate" "$SOURCE_DIR"/src/shellyupdate/*.py
+    compileBytecode
     asRoot install -Dm644 "$SOURCE_DIR/VERSION"                      "$PREFIX/VERSION"
     asRoot install -Dm644 "$SOURCE_DIR/requirements.txt"             "$PREFIX/requirements.txt"
     asRoot install -Dm644 "$SOURCE_DIR/data/$APP_NAME.conf.example"  "$PREFIX/$APP_NAME.conf.example"
@@ -288,7 +306,7 @@ enableServices() {
 
     # (Re)start the tray in the current graphical session
     if ((EUID != 0)) && [[ -n ${WAYLAND_DISPLAY:-}${DISPLAY:-} ]]; then
-        pkill -u "$USER" -f "$APP_NAME-tray.py" 2>/dev/null || true
+        pkill -u "$USER" -f "$TRAY_PROCESS_PATTERN" 2>/dev/null || true
         sleep 0.5
         setsid "$BIN_LINK" --tray >/dev/null 2>&1 < /dev/null &
         printStep "tray started"
@@ -527,12 +545,14 @@ cmdUpdate() {
     CACHYOS_SHELLY_UPDATE_REPO="$repoUrl" bash "$UPDATE_TEMP_DIR/repo/install.sh" install "${forwardedArgs[@]}"
 }
 
-# Called by the pacman hook after python is upgraded (runs as root, no prompts)
+# Called by the pacman hook after python is upgraded (runs as root, no prompts):
+# rebuilds the venv if needed and the bytecode for the new Python
 cmdRebuildVenv() {
     ((EUID == 0)) || die "rebuild-venv is run by pacman as root."
     [[ -f $PREFIX/requirements.txt ]] || exit 0
     # A subshell, so a failure (e.g. no network) warns instead of failing pacman's hook
     (ensureVenv "$PREFIX/requirements.txt") || printWarning "Run '$PREFIX/install.sh update' to repair the tray."
+    compileBytecode
 }
 
 cmdUninstall() {
@@ -545,7 +565,7 @@ cmdUninstall() {
     [[ -f $INSTALLED_APPMAN_FILE ]] && addedAppman="$(cat "$INSTALLED_APPMAN_FILE")"
 
     if [[ -n $TARGET_USER ]]; then
-        pkill -u "$TARGET_USER" -f "$APP_NAME-tray.py" 2>/dev/null || true
+        pkill -u "$TARGET_USER" -f "$TRAY_PROCESS_PATTERN" 2>/dev/null || true
         asUser systemctl --user disable --now "$APP_NAME.timer" >/dev/null 2>&1 || true
     fi
     asRoot systemctl --global disable "$APP_NAME.timer" >/dev/null 2>&1 || true
@@ -637,7 +657,7 @@ cmdStatus() {
 
     printInfo "Services"
     printStep "timer: $(asUser systemctl --user is-active "$APP_NAME.timer" 2>/dev/null || echo inactive)"
-    if pgrep -f "$APP_NAME-tray.py" >/dev/null; then printStep "tray: running"; else printStep "tray: stopped"; fi
+    if pgrep -f "$TRAY_PROCESS_PATTERN" >/dev/null; then printStep "tray: running"; else printStep "tray: stopped"; fi
     if [[ -s $CACHY_STATE_FILE ]]; then
         local cachyItems=()
         mapfile -t cachyItems < "$CACHY_STATE_FILE"
