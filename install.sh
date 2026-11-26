@@ -17,6 +17,16 @@
 #
 # Once installed, this script lives in /opt/cachyos-shelly-update/install.sh,
 # so the repository can be deleted: update and uninstall work from there.
+#
+# Self-update contract (tests/self_update.sh checks it against every release):
+# "update" from /opt is run by the INSTALLED (older) install.sh, which clones
+# the repository and runs the NEW one as
+#   CACHYOS_SHELLY_UPDATE_REPO=<url> bash <clone>/install.sh install [-y]
+# so "install" must keep accepting that, and must turn any older layout into
+# exactly what a fresh install gives: stale files removed (installed-files),
+# the venv rebuilt when requirements.txt or Python changed, bytecode
+# recompiled, units reloaded, the running tray restarted on the new code,
+# and the state in $PREFIX and ~/.local/state kept.
 
 set -euo pipefail
 
@@ -28,7 +38,8 @@ readonly APPLICATIONS_DIR=/usr/local/share/applications
 readonly AUTOSTART_DIR=/etc/xdg/autostart
 readonly USER_UNIT_DIR=/etc/systemd/user
 readonly PACMAN_HOOK=/etc/pacman.d/hooks/$APP_NAME-venv.hook
-# The tray's Python dependencies (PyQt6) live here, not in the system
+# The project's Python: the CLI runs on it (falling back to the system
+# python3 if it is broken) and the tray's dependencies (PyQt6) live in it
 readonly VENV_DIR=$PREFIX/.venv
 # The Python package (CLI + tray) is installed here
 readonly LIB_DIR=$PREFIX/lib
@@ -41,6 +52,9 @@ readonly INSTALLED_APPMAN_FILE=$PREFIX/installed-appman
 readonly APPMAN_URL=https://raw.githubusercontent.com/ivan-hc/AM/main/APP-MANAGER
 # Optional tools the user said no to, so a reinstall/update doesn't ask again
 readonly DECLINED_TOOLS_FILE=$PREFIX/declined-tools
+# Every file installFiles put in place (a trailing / marks a directory it
+# owns), so an update removes what the new version no longer installs
+readonly MANIFEST_FILE=$PREFIX/installed-files
 readonly FLATHUB_URL=https://dl.flathub.org/repo/flathub.flatpakrepo
 readonly YAY_AUR_URL=https://aur.archlinux.org/yay-bin.git
 SOURCE_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
@@ -329,10 +343,10 @@ ensureVenv() {
     builtHash="$(cat "$VENV_DIR/.requirements.sha256" 2>/dev/null || true)"
     builtPython="$(pythonVersion "$VENV_DIR/bin/python" || true)"
     if [[ $builtHash == "$wantedHash" && $builtPython == "$wantedPython" ]]; then
-        printStep "tray virtualenv: ${GREEN}ok${RESET} (Python $builtPython)"
+        printStep "virtualenv: ${GREEN}ok${RESET} (Python $builtPython)"
         return 0
     fi
-    printStep "tray virtualenv: building with Python $wantedPython (downloads PyQt6)"
+    printStep "virtualenv: building with Python $wantedPython (downloads PyQt6)"
     asRoot rm -rf "$VENV_DIR"
     asRoot python3 -m venv "$VENV_DIR"
     asRoot env PIP_ROOT_USER_ACTION=ignore "$VENV_DIR/bin/pip" install --quiet \
@@ -352,20 +366,64 @@ compileBytecode() {
         || printWarning "could not precompile $LIB_DIR (it still works, just starts slower)"
 }
 
+installedFiles=()
+# installFile <mode> <source> <target>: install one file, recorded in the manifest
+installFile() {
+    asRoot install -Dm"$1" "$2" "$3"
+    installedFiles+=("$3")
+}
+
+# Is this manifest entry something only we would have installed? A guard
+# against a damaged manifest: never anything outside $PREFIX that isn't
+# named after us, in the directories we install into.
+isOwnedPath() {
+    local path=${1%/}
+    [[ $path == /* && $path != *..* ]] || return 1
+    [[ $path == "$PREFIX"/?* ]] && return 0
+    case ${path%/*} in
+        "${BIN_LINK%/*}"|"$APPLICATIONS_DIR"|"$AUTOSTART_DIR"|"$USER_UNIT_DIR"|"${PACMAN_HOOK%/*}")
+            [[ ${path##*/} == "$APP_NAME"* ]] ;;
+        *) return 1 ;;
+    esac
+}
+
+# Remove what the previous install listed and this one no longer installs.
+# Installs from before the manifest (up to 2.1.0) only had files this
+# version installs too, so there is nothing to remove for them.
+removeStaleFiles() {
+    local previousFiles=() path
+    [[ -f $MANIFEST_FILE ]] && mapfile -t previousFiles < "$MANIFEST_FILE"
+    for path in "${previousFiles[@]}"; do
+        [[ -n $path ]] || continue
+        printf '%s\n' "${installedFiles[@]}" | grep -qxF -- "$path" && continue
+        if ! isOwnedPath "$path"; then
+            printWarning "left alone: $path (listed in $MANIFEST_FILE, but not one of ours)"
+            continue
+        fi
+        asRoot rm -rf -- "${path%/}"
+        printStep "removed (no longer used): $path"
+    done
+    printf '%s\n' "${installedFiles[@]}" | asRoot tee "$MANIFEST_FILE" >/dev/null
+}
+
 installFiles() {
     printInfo "Installing into $PREFIX"
     [[ -f $SOURCE_DIR/src/$APP_NAME ]] || die "Project files not found in $SOURCE_DIR/src (run install from the repository)."
+    installedFiles=()
 
-    asRoot install -Dm755 "$SOURCE_DIR/src/$APP_NAME"                "$PREFIX/bin/$APP_NAME"
+    installFile 755 "$SOURCE_DIR/src/$APP_NAME"                "$PREFIX/bin/$APP_NAME"
     # A clean package directory: drops modules and bytecode of older versions,
     # and 1.x's single tray file
     asRoot rm -rf "$LIB_DIR"
     asRoot install -Dm644 -t "$LIB_DIR/shellyupdate" "$SOURCE_DIR"/src/shellyupdate/*.py
+    installedFiles+=("$LIB_DIR/")
     compileBytecode
-    asRoot install -Dm644 "$SOURCE_DIR/VERSION"                      "$PREFIX/VERSION"
-    asRoot install -Dm644 "$SOURCE_DIR/requirements.txt"             "$PREFIX/requirements.txt"
-    asRoot install -Dm644 "$SOURCE_DIR/data/$APP_NAME.conf.example"  "$PREFIX/$APP_NAME.conf.example"
+    installFile 644 "$SOURCE_DIR/VERSION"                      "$PREFIX/VERSION"
+    installFile 644 "$SOURCE_DIR/requirements.txt"             "$PREFIX/requirements.txt"
+    installFile 644 "$SOURCE_DIR/data/$APP_NAME.conf.example"  "$PREFIX/$APP_NAME.conf.example"
+    # (Reinstalling from /opt itself: install.sh is already in place)
     [[ $SOURCE_DIR == "$PREFIX" ]] || asRoot install -Dm755 "$SOURCE_DIR/install.sh" "$PREFIX/install.sh"
+    installedFiles+=("$PREFIX/install.sh")
 
     # Remember where we came from, so "update" works without the repository
     local repoUrl="${CACHYOS_SHELLY_UPDATE_REPO:-}"
@@ -378,11 +436,13 @@ installFiles() {
     ensureVenv "$PREFIX/requirements.txt"
 
     asRoot ln -sfn "$PREFIX/bin/$APP_NAME" "$BIN_LINK"
-    asRoot install -Dm644 "$SOURCE_DIR/data/$APP_NAME.desktop"       "$APPLICATIONS_DIR/$APP_NAME.desktop"
-    asRoot install -Dm644 "$SOURCE_DIR/data/$APP_NAME-tray.desktop"  "$AUTOSTART_DIR/$APP_NAME-tray.desktop"
-    asRoot install -Dm644 "$SOURCE_DIR/data/$APP_NAME.service"       "$USER_UNIT_DIR/$APP_NAME.service"
-    asRoot install -Dm644 "$SOURCE_DIR/data/$APP_NAME.timer"         "$USER_UNIT_DIR/$APP_NAME.timer"
-    asRoot install -Dm644 "$SOURCE_DIR/data/$APP_NAME-venv.hook"     "$PACMAN_HOOK"
+    installedFiles+=("$BIN_LINK")
+    installFile 644 "$SOURCE_DIR/data/$APP_NAME.desktop"       "$APPLICATIONS_DIR/$APP_NAME.desktop"
+    installFile 644 "$SOURCE_DIR/data/$APP_NAME-tray.desktop"  "$AUTOSTART_DIR/$APP_NAME-tray.desktop"
+    installFile 644 "$SOURCE_DIR/data/$APP_NAME.service"       "$USER_UNIT_DIR/$APP_NAME.service"
+    installFile 644 "$SOURCE_DIR/data/$APP_NAME.timer"         "$USER_UNIT_DIR/$APP_NAME.timer"
+    installFile 644 "$SOURCE_DIR/data/$APP_NAME-venv.hook"     "$PACMAN_HOOK"
+    removeStaleFiles
     printStep "command: $BIN_LINK"
     printStep "app menu entry, tray autostart, systemd timer and pacman hook installed"
 }
@@ -392,6 +452,7 @@ enableServices() {
     # Timer for every user (the same thing cachy-update does)
     asRoot systemctl --global enable "$APP_NAME.timer" >/dev/null 2>&1 || printWarning "could not enable the timer globally"
 
+    # daemon-reload picks up changed units; restart applies a changed timer
     if asUser systemctl --user daemon-reload 2>/dev/null; then
         asUser systemctl --user restart "$APP_NAME.timer" 2>/dev/null && printStep "timer started"
         # A first check in the background so the tray has data right away
@@ -399,16 +460,48 @@ enableServices() {
     else
         printWarning "No user session found; the timer starts at the next login."
     fi
+    restartTray
+}
 
-    # (Re)start the tray in the current graphical session
-    if ((EUID != 0)) && [[ -n ${WAYLAND_DISPLAY:-}${DISPLAY:-} ]]; then
-        pkill -u "$USER" -f "$TRAY_PROCESS_PATTERN" 2>/dev/null || true
-        sleep 0.5
-        setsid "$BIN_LINK" --tray >/dev/null 2>&1 < /dev/null &
-        printStep "tray started"
-    else
-        printStep "the tray appears at the next login"
+# True while any of the given processes still runs
+anyAlive() {
+    local pid
+    for pid; do kill -0 "$pid" 2>/dev/null && return 0; done
+    return 1
+}
+
+# Stop the running tray (any version) and start the new one in the same
+# session. Its environment comes from the old tray's process, so this works
+# from sudo, a TTY or SSH too, not only from a terminal inside the desktop.
+# Without a running tray, it starts in the current graphical session, if any.
+restartTray() {
+    local trayPids=() environment=() entry attempt
+    if [[ -n $TARGET_USER ]]; then
+        mapfile -t trayPids < <(pgrep -u "$TARGET_USER" -f "$TRAY_PROCESS_PATTERN" 2>/dev/null || true)
     fi
+    if ((${#trayPids[@]})); then
+        # Read as the user: root can't read another user's environ without
+        # CAP_SYS_PTRACE (containers, hardened kernels)
+        while IFS= read -r -d '' entry; do
+            # Set again by the launcher, for the new code's paths
+            case $entry in CACHYOS_SHELLY_UPDATE_BIN=*|PYTHONPATH=*) continue ;; esac
+            environment+=("$entry")
+        done < <(asUser cat "/proc/${trayPids[0]}/environ" 2>/dev/null || cat "/proc/${trayPids[0]}/environ" 2>/dev/null || true)
+        kill "${trayPids[@]}" 2>/dev/null || true
+        # Up to 3 s for it to go, so the two icons never overlap
+        for ((attempt = 0; attempt < 30; attempt++)); do
+            anyAlive "${trayPids[@]}" || break
+            sleep 0.1
+        done
+    elif ((EUID != 0)) && [[ -n ${WAYLAND_DISPLAY:-}${DISPLAY:-} ]]; then
+        mapfile -d '' -t environment < <(env -0)
+    fi
+    if ((${#environment[@]} == 0)); then
+        printStep "the tray appears at the next login"
+        return 0
+    fi
+    asUser env -i "${environment[@]}" setsid "$BIN_LINK" --tray >/dev/null 2>&1 < /dev/null &
+    if ((${#trayPids[@]})); then printStep "tray restarted"; else printStep "tray started"; fi
 }
 
 checkIcons() {
@@ -653,7 +746,8 @@ cmdRebuildVenv() {
     ((EUID == 0)) || die "rebuild-venv is run by pacman as root."
     [[ -f $PREFIX/requirements.txt ]] || exit 0
     # A subshell, so a failure (e.g. no network) warns instead of failing pacman's hook
-    (ensureVenv "$PREFIX/requirements.txt") || printWarning "Run '$PREFIX/install.sh update' to repair the tray."
+    (ensureVenv "$PREFIX/requirements.txt") \
+        || printWarning "The updater runs on the system python3 meanwhile; run '$PREFIX/install.sh update' to repair the tray."
     compileBytecode
 }
 
@@ -662,9 +756,10 @@ cmdUninstall() {
     ((EUID != 0)) && { sudo -v || die "sudo is required"; }
 
     # Read what we installed before $PREFIX is gone
-    local addedPackages=() addedAppman=""
+    local addedPackages=() addedAppman="" installedPaths=() path
     [[ -f $INSTALLED_PACKAGES_FILE ]] && mapfile -t addedPackages < "$INSTALLED_PACKAGES_FILE"
     [[ -f $INSTALLED_APPMAN_FILE ]] && addedAppman="$(cat "$INSTALLED_APPMAN_FILE")"
+    [[ -f $MANIFEST_FILE ]] && mapfile -t installedPaths < "$MANIFEST_FILE"
 
     if [[ -n $TARGET_USER ]]; then
         pkill -u "$TARGET_USER" -f "$TRAY_PROCESS_PATTERN" 2>/dev/null || true
@@ -672,17 +767,22 @@ cmdUninstall() {
     fi
     asRoot systemctl --global disable "$APP_NAME.timer" >/dev/null 2>&1 || true
 
+    # The manifest, plus the fixed list for installs from before it (<= 2.1.0)
     asRoot rm -f "$BIN_LINK" "$APPLICATIONS_DIR/$APP_NAME.desktop" "$AUTOSTART_DIR/$APP_NAME-tray.desktop" \
                  "$USER_UNIT_DIR/$APP_NAME.service" "$USER_UNIT_DIR/$APP_NAME.timer" "$PACMAN_HOOK"
+    for path in "${installedPaths[@]}"; do
+        [[ $path == "$PREFIX"/* ]] && continue      # goes with $PREFIX below
+        if isOwnedPath "$path"; then asRoot rm -rf -- "${path%/}"; fi
+    done
     asUser systemctl --user daemon-reload >/dev/null 2>&1 || true
     # Our timer and tray are gone: now cachy-update can come back. It needs
     # the record and the backup in $PREFIX, so it runs before $PREFIX is deleted.
     local hadCachyRecord=0
     [[ -s $CACHY_STATE_FILE ]] && hadCachyRecord=1
     restoreCachyUpdate
-    # $PREFIX holds the tray virtualenv too, so this removes PyQt6 as well
+    # $PREFIX holds the virtualenv too, so this removes PyQt6 as well
     asRoot rm -rf "$PREFIX"
-    printStep "files removed (including the tray virtualenv)"
+    printStep "files removed (including the virtualenv)"
 
     if ((purge)); then
         if [[ -n $TARGET_HOME ]]; then
@@ -759,10 +859,16 @@ cmdStatus() {
         printStep "flatpak: not installed"
     fi
     if appmanPath="$(findAppman)"; then printStep "appman: ${GREEN}ok${RESET} ($appmanPath)"; else printStep "appman: not installed"; fi
-    if "$VENV_DIR/bin/python" -c 'import PyQt6' 2>/dev/null; then
-        printStep "tray virtualenv: ${GREEN}ok${RESET}"
+    local venvPython
+    if [[ -x $VENV_DIR/bin/python ]] && venvPython="$(pythonVersion "$VENV_DIR/bin/python")"; then
+        printStep "updater Python: ${GREEN}virtualenv${RESET} (Python $venvPython)"
     else
-        printStep "tray virtualenv: ${RED}broken or missing${RESET} (run: $PREFIX/install.sh update)"
+        printStep "updater Python: ${YELLOW}system python3${RESET} (virtualenv broken or missing; run: $PREFIX/install.sh update)"
+    fi
+    if "$VENV_DIR/bin/python" -c 'import PyQt6' 2>/dev/null; then
+        printStep "tray (PyQt6 in the virtualenv): ${GREEN}ok${RESET}"
+    else
+        printStep "tray (PyQt6 in the virtualenv): ${RED}broken or missing${RESET} (run: $PREFIX/install.sh update)"
     fi
 
     printInfo "Services"

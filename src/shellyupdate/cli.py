@@ -1,5 +1,6 @@
-"""The command line updater. Standard library only: it runs on the system's
-python3, not on the tray's virtualenv."""
+"""The command line updater. Standard library only: the launcher runs it on
+the project's virtualenv Python, or on the system python3 when the venv is
+broken, so it must not need anything installed in the venv."""
 
 import fcntl
 import io
