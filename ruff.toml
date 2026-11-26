@@ -4,6 +4,8 @@
 #   F           pyflakes: unused imports/variables, undefined names, ...
 #   B           flake8-bugbear: likely bugs (late-binding closures, ...)
 target-version = "py314"
+# The launcher has no .py extension
+extend-include = ["src/cachyos-shelly-update"]
 
 [lint]
 select = ["E4", "E7", "E9", "F", "B"]
