@@ -7,10 +7,10 @@ An updater in the style of [cachy-update](https://github.com/CachyOS/cachy-updat
 ## What it does
 
 - **`cachyos-shelly-update`** lists the updates grouped by source, asks, runs `shelly upgrade all` and then `appman -u`. Afterwards it shows pending `.pacnew` files and orphan packages, and warns when the kernel changed.
-- **Automatic checks**: a systemd timer runs `cachyos-shelly-update --check` 2 minutes after login and then every 6 hours. A notification shows up when new updates appear.
-- **Tray icon**: uses cachy-update's icons and honors `TrayIconStyle` from `arch-update.conf`.
+- **Automatic checks**: a systemd timer runs `cachyos-shelly-update --check` 2 minutes after login and then every hour. A notification shows up when new updates appear. Checks never take pacman's database lock (see [No locks](#no-locks)), so they can't get in the way of pacman, Shelly or yay.
+- **Tray icon**: looks and behaves like cachy-update's: the same icons, following `TrayIconStyle`, `ColorblindMode` and `ShowTrayWhenRelevant` from `arch-update.conf`, and the same menu.
   - Left click opens the updater in your default terminal emulator (see [Terminal](#terminal)).
-  - Right click shows the updates per source, the last and next check, and "Check for updates" and "Quit".
+  - Right click shows the number of updates, one entry per source with its count (Packages, AUR, Flatpak, AppImage, AppMan; only sources with updates), the last and next check, and "Run CachyOS-Shelly-Update", "Check for updates" and "Exit".
 
 ### AppMan
 
@@ -26,6 +26,14 @@ The tray opens the updater in the terminal emulator you use, found in this order
 4. `$TERMINAL`
 5. `x-terminal-emulator`
 6. the first one installed of Konsole, Ghostty, kitty, Alacritty, foot, WezTerm, Ptyxis, Console, GNOME Terminal, Xfce Terminal and xterm
+
+### No locks
+
+- Repositories: `checkupdates` syncs a temporary copy of the databases, like arch-update. Shelly's own repository check syncs the real ones, which takes pacman's lock, so it is never used.
+- AUR and AppImage: `shelly list-updates ... --json`, which only reads the local package database. The JSON output is used because Shelly's normal output is a formatted table.
+- Flatpak and AppMan don't involve pacman.
+
+If you start an update while a background check is running, it waits for the check to finish (up to 5 minutes, `CACHYOS_SHELLY_UPDATE_LOCK_TIMEOUT`) instead of failing.
 
 ### Performance
 
@@ -45,13 +53,15 @@ Run it as your **normal user**: the script asks for `sudo` when it needs to, and
 
 The installer:
 
-1. Checks for and installs the dependencies: `shelly`, `shelly-flatpak-backend`, `flatpak`, `python`, `pacman-contrib`, `libnotify` and `curl`, plus tools AppMan uses to unpack apps (`wget`, `unzip`, `7zip`, `binutils`, `file`, `xz`; optional).
-   It looks in the repositories first (CachyOS already ships Shelly). If a package isn't there and **yay** is installed, it uses the `-bin` version from the AUR. Packages that only *provide* a dependency, like `shelly-bin`, count too.
-2. Installs **AppMan** in `~/.local/bin/appman` if you don't have it, the same way AppMan's own installer does. It isn't configured: the first `appman -i <app>` asks where to keep apps.
-3. Copies the files to **`/opt/cachyos-shelly-update`**. The installation doesn't depend on the repository, so the clone can be deleted afterwards.
-4. Creates a private Python virtualenv in `/opt/cachyos-shelly-update/.venv` with the tray's dependency (PyQt6, pinned in `requirements.txt`), so nothing is added to the system Python. The updater itself only needs the standard library and runs on the system's `python3`. A pacman hook rebuilds the virtualenv and the precompiled code when the `python` package moves to a new version.
-5. Creates the `/usr/local/bin/cachyos-shelly-update` link, the app menu entry, the tray autostart and the systemd user timer.
-6. Turns cachy-update off, so you don't get two tray icons and two checks: its timer (per user or for all users), its tray at login and the running tray. The package and its files stay untouched; the tray is switched off for your user with an `~/.config/autostart/arch-update-tray.desktop` file containing `Hidden=true` (your own copy of that file, if any, is backed up). What was on is recorded.
+1. Asks to install **yay** when there is no AUR helper (yay or paru): from the repositories (CachyOS has it), or built from the AUR (`yay-bin`) otherwise.
+2. Checks for and installs the dependencies: `shelly`, `python`, `pacman-contrib`, `libnotify` and `curl`, plus tools AppMan uses to unpack apps (`wget`, `unzip`, `7zip`, `binutils`, `file`, `xz`; optional).
+   It looks in the repositories first (CachyOS already ships Shelly). If a package isn't there and yay or paru is installed, it uses the `-bin` version from the AUR. Packages that only *provide* a dependency, like `shelly-bin`, count too.
+3. Asks to install **Flatpak** with Shelly's Flatpak backend and the **Flathub** remote when they're missing.
+4. Asks to install **AppMan** in `~/.local/bin/appman` if you don't have it, the same way AppMan's own installer does. It isn't configured: the first `appman -i <app>` asks where to keep apps.
+5. Copies the files to **`/opt/cachyos-shelly-update`**. The installation doesn't depend on the repository, so the clone can be deleted afterwards.
+6. Creates a private Python virtualenv in `/opt/cachyos-shelly-update/.venv` with the tray's dependency (PyQt6, pinned in `requirements.txt`), so nothing is added to the system Python. The updater itself only needs the standard library and runs on the system's `python3`. A pacman hook rebuilds the virtualenv and the precompiled code when the `python` package moves to a new version.
+7. Creates the `/usr/local/bin/cachyos-shelly-update` link, the app menu entry, the tray autostart and the systemd user timer.
+8. Turns cachy-update off, so you don't get two tray icons and two checks: its timer (per user or for all users), its tray at login and the running tray. The package and its files stay untouched; the tray is switched off for your user with an `~/.config/autostart/arch-update-tray.desktop` file containing `Hidden=true` (your own copy of that file, if any, is backed up). What was on is recorded.
 
 ## Updating and removing
 

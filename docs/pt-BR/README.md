@@ -7,10 +7,10 @@ Atualizador no estilo do [cachy-update](https://github.com/CachyOS/cachy-update)
 ## O que ele faz
 
 - **`cachyos-shelly-update`** lista as atualizações separadas por origem, pergunta, roda `shelly upgrade all` e depois `appman -u`. Em seguida mostra os `.pacnew` pendentes e os pacotes órfãos, e avisa se o kernel mudou.
-- **Verificação automática**: um timer do systemd roda `cachyos-shelly-update --check` 2 min após o login e depois a cada 6 h. Quando surge atualização nova, aparece uma notificação.
-- **Bandeja**: usa os mesmos ícones do cachy-update e respeita o `TrayIconStyle` do `arch-update.conf`.
+- **Verificação automática**: um timer do systemd roda `cachyos-shelly-update --check` 2 min após o login e depois a cada hora. Quando surge atualização nova, aparece uma notificação. As verificações nunca pegam a trava do banco do pacman (veja [Sem travas](#sem-travas)), então não atrapalham o pacman, o Shelly ou o yay.
+- **Bandeja**: tem a aparência e o comportamento da do cachy-update: os mesmos ícones, seguindo `TrayIconStyle`, `ColorblindMode` e `ShowTrayWhenRelevant` do `arch-update.conf`, e o mesmo menu.
   - Clique esquerdo abre o atualizador no seu emulador de terminal padrão (veja [Terminal](#terminal)).
-  - Clique direito mostra as atualizações por origem, a última e a próxima verificação, e as opções "Check for updates" e "Quit".
+  - Clique direito mostra o número de atualizações, uma entrada por origem com a contagem (Packages, AUR, Flatpak, AppImage, AppMan; só as que têm atualizações), a última e a próxima verificação, e "Run CachyOS-Shelly-Update", "Check for updates" e "Exit".
 
 As mensagens do programa são em inglês; os atalhos do menu e da bandeja aparecem em português.
 
@@ -28,6 +28,14 @@ A bandeja abre o atualizador no emulador de terminal que você usa, procurado ne
 4. `$TERMINAL`
 5. `x-terminal-emulator`
 6. o primeiro instalado entre Konsole, Ghostty, kitty, Alacritty, foot, WezTerm, Ptyxis, Console, GNOME Terminal, Xfce Terminal e xterm
+
+### Sem travas
+
+- Repositórios: o `checkupdates` sincroniza uma cópia temporária dos bancos, como o arch-update. A verificação de repositórios do próprio Shelly sincroniza os bancos de verdade, o que pega a trava do pacman, então ela nunca é usada.
+- AUR e AppImage: `shelly list-updates ... --json`, que só lê o banco de pacotes local. A saída em JSON é usada porque a saída normal do Shelly é uma tabela formatada.
+- Flatpak e AppMan não envolvem o pacman.
+
+Se você começar uma atualização enquanto uma verificação roda em segundo plano, ela espera a verificação terminar (até 5 minutos, `CACHYOS_SHELLY_UPDATE_LOCK_TIMEOUT`) em vez de falhar.
 
 ### Desempenho
 
@@ -47,13 +55,15 @@ Rode como **usuário normal**: o script pede o `sudo` quando precisa, e o `yay` 
 
 O instalador:
 
-1. Verifica ou instala as dependências: `shelly`, `shelly-flatpak-backend`, `flatpak`, `python`, `pacman-contrib`, `libnotify` e `curl`, além das ferramentas que o AppMan usa para descompactar apps (`wget`, `unzip`, `7zip`, `binutils`, `file`, `xz`; opcionais).
-   Primeiro procura nos repositórios (o CachyOS já tem o Shelly). Se um pacote não estiver lá e o **yay** estiver instalado, usa a versão `-bin` do AUR. Pacotes que só *fornecem* a dependência, como o `shelly-bin`, também contam.
-2. Instala o **AppMan** em `~/.local/bin/appman` se você não tiver, do mesmo jeito que o instalador oficial dele. Ele não é configurado: o primeiro `appman -i <app>` pergunta onde guardar os apps.
-3. Copia os arquivos para **`/opt/cachyos-shelly-update`**. A instalação não depende do repositório, então o clone pode ser apagado depois.
-4. Cria um virtualenv Python próprio em `/opt/cachyos-shelly-update/.venv` com a dependência da bandeja (PyQt6, fixada no `requirements.txt`), sem instalar nada no Python do sistema. O atualizador em si só usa a biblioteca padrão e roda no `python3` do sistema. Um hook do pacman reconstrói o virtualenv e o código pré-compilado quando o pacote `python` muda de versão.
-5. Cria o link `/usr/local/bin/cachyos-shelly-update`, o atalho no menu de aplicativos, o autostart da bandeja e o timer do systemd de usuário.
-6. Desliga o cachy-update, para não ficar com dois ícones na bandeja e duas verificações: o timer dele (do usuário ou de todos os usuários), a bandeja no login e a bandeja que estiver rodando. O pacote e os arquivos dele não são mexidos; a bandeja é desligada para o seu usuário com um arquivo `~/.config/autostart/arch-update-tray.desktop` contendo `Hidden=true` (se você já tinha esse arquivo, ele é guardado). O que estava ligado fica registrado.
+1. Pergunta se é para instalar o **yay** quando não há um ajudante do AUR (yay ou paru): pelos repositórios (o CachyOS tem), ou compilado do AUR (`yay-bin`) se não tiver.
+2. Verifica ou instala as dependências: `shelly`, `python`, `pacman-contrib`, `libnotify` e `curl`, além das ferramentas que o AppMan usa para descompactar apps (`wget`, `unzip`, `7zip`, `binutils`, `file`, `xz`; opcionais).
+   Primeiro procura nos repositórios (o CachyOS já tem o Shelly). Se um pacote não estiver lá e o yay ou o paru estiver instalado, usa a versão `-bin` do AUR. Pacotes que só *fornecem* a dependência, como o `shelly-bin`, também contam.
+3. Pergunta se é para instalar o **Flatpak** com o backend de Flatpak do Shelly e o repositório **Flathub** quando faltarem.
+4. Pergunta se é para instalar o **AppMan** em `~/.local/bin/appman` se você não tiver, do mesmo jeito que o instalador oficial dele. Ele não é configurado: o primeiro `appman -i <app>` pergunta onde guardar os apps.
+5. Copia os arquivos para **`/opt/cachyos-shelly-update`**. A instalação não depende do repositório, então o clone pode ser apagado depois.
+6. Cria um virtualenv Python próprio em `/opt/cachyos-shelly-update/.venv` com a dependência da bandeja (PyQt6, fixada no `requirements.txt`), sem instalar nada no Python do sistema. O atualizador em si só usa a biblioteca padrão e roda no `python3` do sistema. Um hook do pacman reconstrói o virtualenv e o código pré-compilado quando o pacote `python` muda de versão.
+7. Cria o link `/usr/local/bin/cachyos-shelly-update`, o atalho no menu de aplicativos, o autostart da bandeja e o timer do systemd de usuário.
+8. Desliga o cachy-update, para não ficar com dois ícones na bandeja e duas verificações: o timer dele (do usuário ou de todos os usuários), a bandeja no login e a bandeja que estiver rodando. O pacote e os arquivos dele não são mexidos; a bandeja é desligada para o seu usuário com um arquivo `~/.config/autostart/arch-update-tray.desktop` contendo `Hidden=true` (se você já tinha esse arquivo, ele é guardado). O que estava ligado fica registrado.
 
 ## Atualizar e remover
 
