@@ -9,6 +9,35 @@ e o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-11-25
+
+### Corrigido
+- O ícone da bandeja mostrava sempre "updates available", e uma entrada
+  AppImage vazia aparecia no menu: a saída do Shelly é uma tabela formatada,
+  e os cabeçalhos, bordas e mensagens dela (como "No appimage updates
+  available") eram contados como atualizações. As verificações de AUR e
+  AppImage agora leem `shelly list-updates ... --json`, e os AppImages só
+  contam quando o Shelly marca `IsUpdateAvailable`.
+- Começar uma atualização durante uma verificação em segundo plano falhava
+  com "already running"; agora ela espera a verificação (até 5 minutos).
+
+### Alterado
+- O menu da bandeja é o do cachy-update, com contagens no lugar das listas
+  de pacotes: o total, uma entrada "Origem (N)" por origem com atualizações,
+  a última e a próxima verificação no formato "1h 5m", e depois Run, Check
+  for updates e Exit. O `ShowTrayWhenRelevant` do `arch-update.conf` esconde
+  o ícone quando está tudo em dia. "Repositories" virou "Packages", como no
+  cachy-update.
+- O timer verifica a cada hora (antes, 6 horas). Nenhuma verificação pega a
+  trava do pacman: o fallback do Shelly para os repositórios, que
+  sincronizava os bancos de verdade, saiu; o `checkupdates` é sempre usado.
+- O instalador pergunta antes de instalar o que falta, em vez de exigir ou
+  instalar sem avisar: yay (pelos repositórios, ou `yay-bin` do AUR), Flatpak
+  com o backend de Flatpak do Shelly e o Flathub, e o AppMan. Um "não" fica
+  guardado até a remoção. O Flatpak deixou de ser dependência obrigatória; o
+  atualizador o pula quando não está instalado.
+- As perguntas do instalador aparecem mesmo quando as respostas vêm por pipe.
+
 ## [2.0.0] - 2026-11-25
 
 ### Alterado
@@ -117,7 +146,8 @@ e o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 - Ícone de bandeja em PyQt6 com os ícones do cachy-update.
 - `install.sh` com install, update, uninstall e status.
 
-[Unreleased]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v2.0.0...main
+[Unreleased]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v2.1.0...main
+[2.1.0]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v2.0.0...v2.1.0
 [2.0.0]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v1.2.0...v2.0.0
 [1.2.0]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v1.1.0...v1.2.0
 [1.1.0]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v1.0.0...v1.1.0

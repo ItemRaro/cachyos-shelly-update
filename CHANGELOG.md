@@ -9,6 +9,34 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-11-25
+
+### Fixed
+- The tray icon always showed "updates available", and an empty AppImage
+  entry appeared in the menu: Shelly's output is a formatted table, and its
+  headers, borders and messages (like "No appimage updates available") were
+  counted as updates. The AUR and AppImage checks now read
+  `shelly list-updates ... --json`, and AppImages only count when Shelly
+  marks them `IsUpdateAvailable`.
+- Starting an update while a background check ran failed with "already
+  running"; it now waits for the check (up to 5 minutes).
+
+### Changed
+- The tray menu is cachy-update's, with counts instead of package lists:
+  the total, one "Source (N)" entry per source with updates, last and next
+  check in its "1h 5m" format, then Run, Check for updates and Exit.
+  `ShowTrayWhenRelevant` from `arch-update.conf` hides the icon while up to
+  date. "Repositories" is now "Packages", as in cachy-update.
+- The timer checks every hour (was 6 hours). No check takes pacman's lock:
+  the Shelly fallback for the repositories, which synced the real databases,
+  is gone; `checkupdates` is always used.
+- The installer asks to install what's missing instead of requiring or
+  silently adding it: yay (from the repositories, or `yay-bin` from the AUR),
+  Flatpak with Shelly's Flatpak backend and Flathub, and AppMan. A "no" is
+  remembered until uninstall. Flatpak is no longer a hard dependency; the
+  updater skips it when it isn't installed.
+- The installer's questions show up even when answers are piped in.
+
 ## [2.0.0] - 2026-11-25
 
 ### Changed
@@ -114,7 +142,8 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - PyQt6 tray icon using cachy-update's icons.
 - `install.sh` with install, update, uninstall and status.
 
-[Unreleased]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v2.0.0...main
+[Unreleased]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v2.1.0...main
+[2.1.0]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v2.0.0...v2.1.0
 [2.0.0]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v1.2.0...v2.0.0
 [1.2.0]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v1.1.0...v1.2.0
 [1.1.0]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v1.0.0...v1.1.0

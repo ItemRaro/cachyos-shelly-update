@@ -3,7 +3,7 @@ Description=Periodic cachyos-shelly-update check
 
 [Timer]
 OnStartupSec=2min
-OnUnitActiveSec=6h
+OnUnitActiveSec=1h
 RandomizedDelaySec=5min
 
 [Install]

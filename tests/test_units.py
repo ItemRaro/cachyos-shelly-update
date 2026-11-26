@@ -39,11 +39,21 @@ class CoreTests(unittest.TestCase):
         self.archUpdateConfig.parent.mkdir(parents=True, exist_ok=True)
         self.archUpdateConfig.unlink(missing_ok=True)
 
-    def testHumanDuration(self):
-        cases = {30: "less than 1 min", 600: "10 min", 3600: "1 h", 5400: "1 h 30 min",
-                 2 * 86400: "2 d", 90000: "1 d 1 h"}
+    def testFormatDurationLikeCachyUpdate(self):
+        cases = {30: "30s", 600: "10m", 3600: "1h", 5403: "1h 30m 3s", 2 * 86400: "2d",
+                 90060: "1d 1h 1m", 0: None, -5: None}
         for seconds, expected in cases.items():
-            self.assertEqual(core.humanDuration(seconds), expected)
+            self.assertEqual(core.formatDuration(seconds), expected)
+
+    def testShowTrayWhenRelevant(self):
+        self.assertFalse(core.showTrayWhenRelevant())
+        self.archUpdateConfig.write_text("TrayIconStyle=blue\n  ShowTrayWhenRelevant\n")
+        self.assertTrue(core.showTrayWhenRelevant())
+        self.archUpdateConfig.write_text("#ShowTrayWhenRelevant\n")
+        self.assertFalse(core.showTrayWhenRelevant())
+
+    def testRepositoriesAreCalledPackagesLikeCachyUpdate(self):
+        self.assertEqual(dict(core.SOURCES)["repo"], "Packages")
 
     def testUpdatesAvailableText(self):
         self.assertEqual(core.updatesAvailableText(1), "1 update available")
@@ -71,10 +81,40 @@ class CoreTests(unittest.TestCase):
 
 
 class ShellyOutputTests(unittest.TestCase):
-    def testStripShellyNoise(self):
-        output = ("\x1b[1m:: Checking AUR\x1b[0m\n   foo-bin 1.0 -> 1.1\n\nNo updates available\n"
-                  "==> done\nSystem is up to date\nbar 2 -> 3\n")
-        self.assertEqual(sources.stripShellyNoise(output), ["foo-bin 1.0 -> 1.1", "bar 2 -> 3"])
+    """Shelly's --json output (its plain output is a table, never parsed)."""
+
+    def shellyPrints(self, output):
+        return mock.patch.object(sources, "runQuiet", return_value=output)
+
+    def testAurJson(self):
+        output = '[{"Name":"foo-bin","Version":"1.0-1","NewVersion":"1.1-1","Url":"x"},{"Version":"9"}]'
+        with self.shellyPrints(output) as runQuiet:
+            self.assertEqual(sources.checkAur(skipDevel=True), ["foo-bin 1.0-1 -> 1.1-1"])
+        command = runQuiet.call_args.args[0]
+        self.assertEqual(command, ["shelly", "list-updates", "aur", "--no-devel", "--json"])
+
+    def testAppimageJsonOnlyCountsAvailableUpdates(self):
+        output = ('[{"Name":"Tool","Version":"2.0","IsUpdateAvailable":true},'
+                  '{"Name":"Other","Version":"1.0","IsUpdateAvailable":false}]')
+        with self.shellyPrints(output):
+            self.assertEqual(sources.checkAppimage(), ["Tool -> 2.0"])
+
+    def testNothingToDo(self):
+        with self.shellyPrints("[]"):
+            self.assertEqual(sources.checkAur(skipDevel=False), [])
+
+    def testPlainTextOrGarbageIsNeverCounted(self):
+        """Regression: Shelly's table and messages were counted as updates."""
+        for output in ("No appimage updates available\n", "│ Name │ Installed │\n", "", "{}", "[1, 2]"):
+            with self.shellyPrints(output):
+                self.assertEqual(sources.checkAppimage(), [], output)
+                self.assertEqual(sources.checkAur(skipDevel=False), [], output)
+
+    def testRepositoriesNeverUseShelly(self):
+        """Shelly's standard check syncs the real databases (pacman's lock)."""
+        with mock.patch.object(sources.shutil, "which", return_value=None), self.shellyPrints("x") as runQuiet:
+            self.assertEqual(sources.checkRepo(), [])
+        runQuiet.assert_not_called()
 
     def testShortVersion(self):
         cases = {
@@ -153,19 +193,18 @@ class CheckAllTests(unittest.TestCase):
             time.sleep(0.4)
             return ["y"]
 
-        with mock.patch.multiple(sources, checkRepo=slowShellyCheck, checkAur=slowShellyCheck,
+        with mock.patch.multiple(sources, checkRepo=slowCheck, checkAur=slowShellyCheck,
                                  checkAppimage=slowShellyCheck, checkFlatpak=slowCheck,
-                                 checkAppman=slowCheck), \
-                mock.patch.object(sources.shutil, "which", return_value=None):
+                                 checkAppman=slowCheck):
             startTime = time.monotonic()
             results = sources.checkAll(set(core.SOURCE_KEYS), skipDevel=False)
             elapsed = time.monotonic() - startTime
 
-        self.assertEqual(results, {"repo": ["x"], "aur": ["x"], "appimage": ["x"],
+        self.assertEqual(results, {"repo": ["y"], "aur": ["x"], "appimage": ["x"],
                                    "flatpak": ["y"], "appman": ["y"]})
         self.assertEqual(max(overlaps), 1, "two Shelly calls ran at the same time")
-        # 3 Shelly calls in sequence (1.2 s) while flatpak and AppMan run alongside
-        self.assertLess(elapsed, 1.9)
+        # 2 Shelly calls in sequence (0.8 s) while the others run alongside
+        self.assertLess(elapsed, 1.3)
 
     def testDisabledSourcesAreNotChecked(self):
         calls = []
@@ -283,6 +322,36 @@ class TerminalTests(unittest.TestCase):
 
     def testNoTerminalAtAll(self):
         self.assertIsNone(self.command())
+
+
+class LockTests(unittest.TestCase):
+    """Our single-instance lock: the timer skips, an interactive run waits."""
+
+    def holdLock(self, seconds):
+        import fcntl
+        holder = open(core.LOCK_FILE, "w")
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        threading.Timer(seconds, holder.close).start()
+
+    def testCheckSkipsRightAway(self):
+        self.holdLock(1)
+        startTime = time.monotonic()
+        self.assertIsNone(cli.acquireLock(0))
+        self.assertLess(time.monotonic() - startTime, 0.5)
+        time.sleep(1.2)
+
+    def testInteractiveRunWaitsForTheCheck(self):
+        self.holdLock(1)
+        with mock.patch("sys.stdout"):
+            lock = cli.acquireLock(10)
+        self.assertIsNotNone(lock)
+        lock.close()
+
+    def testInteractiveRunGivesUp(self):
+        self.holdLock(2)
+        with mock.patch("sys.stdout"):
+            self.assertIsNone(cli.acquireLock(0.6))
+        time.sleep(1.6)
 
 
 if __name__ == "__main__":
