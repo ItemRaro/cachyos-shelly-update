@@ -116,17 +116,31 @@ def readVersion(prefix: str) -> str:
         return "dev"
 
 
-def acquireLock():
-    """The single-instance lock, or None if another run holds it. Python file
-    descriptors aren't inherited by child processes, so a leftover child can
-    never keep the lock after we exit."""
+# How long an interactive run waits for a background check to finish
+LOCK_WAIT_SECONDS = float(os.environ.get("CACHYOS_SHELLY_UPDATE_LOCK_TIMEOUT") or 300)
+LOCK_RETRY_SECONDS = 0.5
+
+
+def acquireLock(waitSeconds: float = 0):
+    """The single-instance lock (our own, not pacman's), or None if another
+    run still holds it after waitSeconds. Python file descriptors aren't
+    inherited by child processes, so a leftover child can never keep the
+    lock after we exit."""
     lockFile = open(core.LOCK_FILE, "w")
-    try:
-        fcntl.flock(lockFile, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        lockFile.close()
-        return None
-    return lockFile
+    deadline = time.monotonic() + waitSeconds
+    announced = False
+    while True:
+        try:
+            fcntl.flock(lockFile, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return lockFile
+        except OSError:
+            if time.monotonic() >= deadline:
+                lockFile.close()
+                return None
+        if not announced:
+            printInfo("Waiting for the background check to finish...")
+            announced = True
+        time.sleep(LOCK_RETRY_SECONDS)
 
 
 def updateState(options: Options) -> None:
@@ -220,14 +234,17 @@ def main(selfPath: str, prefix: str, libDir: str, arguments: list[str]) -> int:
         printError("shelly not found (sudo pacman -S shelly)")
         return finish(1)
 
+    if not shutil.which("flatpak"):
+        options.enabledSources.discard("flatpak")    # also passes --no-flatpak to Shelly
     appmanBin = sources.findAppman()
     if "appman" in options.enabledSources and (appmanBin is None or sources.appmanAppsDir() is None):
         options.enabledSources.discard("appman")
 
-    lock = acquireLock()
+    # The timer skips a round if another run is busy; an interactive run waits
+    lock = acquireLock(0 if options.mode == "check" else LOCK_WAIT_SECONDS)
     if lock is None:
         if options.mode == "check":
-            return 0                    # the timer just skips this round
+            return 0
         printError(f"Another {core.APP_NAME} instance is already running.")
         return finish(1)
 

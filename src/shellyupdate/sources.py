@@ -2,8 +2,16 @@
 
 Checks run in parallel (see checkAll): they mostly wait on the network.
 Shelly calls stay in one sequence, since parallel runs of it are untested.
+
+None of the checks takes pacman's database lock, so a check can never get in
+the way of pacman, Shelly or an AUR helper:
+  - repositories: checkupdates syncs a temporary copy of the databases
+    (Shelly's own "list-updates standard" syncs the real ones, which needs
+    the lock, so it is never used)
+  - AUR and AppImage: Shelly only reads the local package database
 """
 
+import json
 import os
 import re
 import shutil
@@ -16,9 +24,6 @@ from pathlib import Path
 
 from .core import CONFIG_HOME, HOME_DIR
 
-ANSI_ESCAPE_PATTERN = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-SHELLY_NOISE_PATTERN = re.compile(
-    r"^$|[Nn]o (updates|packages)|[Uu]p.to.date|[Nn]othing|^(::|==>|Checking|Fetching|Synchroniz)")
 VERSION_NUMBER_PATTERN = re.compile(r"[0-9]+(\.[0-9]+)+")
 
 APPMAN_CONFIG_FILE = CONFIG_HOME / "appman" / "appman-config"
@@ -42,35 +47,44 @@ def runQuiet(command: list[str], extraEnvironment: dict | None = None) -> str:
         return ""
 
 
-def stripShellyNoise(output: str) -> list[str]:
-    """Shelly's update lines without colors, blank lines and "nothing to do" messages."""
-    lines = []
-    for line in output.splitlines():
-        line = ANSI_ESCAPE_PATTERN.sub("", line).lstrip()
-        if not SHELLY_NOISE_PATTERN.search(line):
-            lines.append(line)
-    return lines
+def shellyJson(*arguments: str) -> list[dict]:
+    """The items of a "shelly ... --json" listing ([] on any failure).
+    Shelly's plain output is a formatted table with headers, borders and
+    "nothing to do" messages, so it is never parsed."""
+    try:
+        items = json.loads(runQuiet(["shelly", *arguments, "--json"], {"LC_ALL": "C"}))
+    except ValueError:
+        return []
+    return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
 
 
-def shelly(*arguments: str) -> list[str]:
-    return stripShellyNoise(runQuiet(["shelly", *arguments], {"LC_ALL": "C"}))
+def aurUpdateLines(items: list[dict]) -> list[str]:
+    return [f"{item.get('Name', '?')} {item.get('Version', '?')} -> {item.get('NewVersion', '?')}"
+            for item in items if item.get("Name")]
+
+
+def appimageUpdateLines(items: list[dict]) -> list[str]:
+    """Shelly lists AppImages with IsUpdateAvailable; Version is the new one."""
+    return [f"{item['Name']} -> {item.get('Version') or '?'}"
+            for item in items if item.get("Name") and item.get("IsUpdateAvailable", True)]
 
 
 def checkRepo() -> list[str]:
-    if shutil.which("checkupdates"):
-        # Like arch-update: a temporary database, no root, the system one untouched
-        with tempfile.TemporaryDirectory(prefix="cachyos-shelly-update-db.") as tempDb:
-            output = runQuiet(["checkupdates"], {"CHECKUPDATES_DB": tempDb})
-        return [line for line in output.splitlines() if line.strip()]
-    return shelly("list-updates", "standard")
+    """Like arch-update: checkupdates with a temporary database, no root and
+    no lock. pacman-contrib (checkupdates) is a dependency."""
+    if not shutil.which("checkupdates"):
+        return []
+    with tempfile.TemporaryDirectory(prefix="cachyos-shelly-update-db.") as tempDb:
+        output = runQuiet(["checkupdates"], {"CHECKUPDATES_DB": tempDb})
+    return [line for line in output.splitlines() if line.strip()]
 
 
 def checkAur(skipDevel: bool) -> list[str]:
-    return shelly("list-updates", "aur", *(["--no-devel"] if skipDevel else []))
+    return aurUpdateLines(shellyJson("list-updates", "aur", *(["--no-devel"] if skipDevel else [])))
 
 
 def checkAppimage() -> list[str]:
-    return shelly("list-updates", "appimage")
+    return appimageUpdateLines(shellyJson("list-updates", "appimage"))
 
 
 def checkFlatpak() -> list[str]:
@@ -188,14 +202,10 @@ def checkAppman() -> list[str]:
 # ---------- all sources ----------
 def checkAll(enabledKeys: set[str], skipDevel: bool) -> dict[str, list[str]]:
     """Run every enabled check in parallel and return {source key: update lines}.
-    Shelly is called from a single thread, one call after another; the repo
-    check only joins that sequence when it has to fall back to Shelly."""
+    Shelly is called from a single thread, one call after another."""
     results = {key: [] for key in ("repo", "aur", "flatpak", "appimage", "appman")}
-    repoUsesShelly = shutil.which("checkupdates") is None
 
     def runShellyChecks():
-        if "repo" in enabledKeys and repoUsesShelly:
-            results["repo"] = checkRepo()
         if "aur" in enabledKeys:
             results["aur"] = checkAur(skipDevel)
         if "appimage" in enabledKeys:
@@ -209,9 +219,8 @@ def checkAll(enabledKeys: set[str], skipDevel: bool) -> dict[str, list[str]]:
         threading.Thread(target=runShellyChecks),
         threading.Thread(target=runIndependentCheck, args=("flatpak", checkFlatpak)),
         threading.Thread(target=runIndependentCheck, args=("appman", checkAppman)),
+        threading.Thread(target=runIndependentCheck, args=("repo", checkRepo)),
     ]
-    if not repoUsesShelly:
-        threads.append(threading.Thread(target=runIndependentCheck, args=("repo", checkRepo)))
     for thread in threads:
         thread.start()
     for thread in threads:

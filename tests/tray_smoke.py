@@ -25,24 +25,40 @@ os.environ.update({
     "CACHYOS_SHELLY_UPDATE_BIN": "/opt/cachyos-shelly-update/bin/cachyos-shelly-update",
 })
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-for directory in ("run", "config", "bin"):
+for directory in ("run", "config", "config/arch-update", "bin"):
     (tempDir / directory).mkdir()
 (tempDir / "config" / "kdeglobals").write_text(
     "[General]\nTerminalApplication=ghostty\n\n[Icons]\nTheme=Papirus-Dark\n")
+archUpdateConfig = tempDir / "config" / "arch-update" / "arch-update.conf"
 # The KDE default terminal, plus another one that must not be picked
 for terminalName in ("ghostty", "alacritty"):
     fakeTerminal = fakeBinDir / terminalName
     fakeTerminal.write_text(f'#!/bin/sh\necho "{terminalName} $*" >> "{terminalLog}"\n')
     fakeTerminal.chmod(0o755)
+# systemctl list-timers -o json, as cachy-update reads it: next run in ~59 min
+(fakeBinDir / "systemctl").write_text(
+    f'#!/bin/sh\necho \'[{{"next": {int((time.time() + 3545) * 1_000_000)}}}]\'\n')
+(fakeBinDir / "systemctl").chmod(0o755)
 
 stateDir = tempDir / "state" / "cachyos-shelly-update"
 stateDir.mkdir(parents=True)
-(stateDir / "updates_repo").write_text("bar 2.0-1 -> 2.1-1\n")
-(stateDir / "updates_aur").write_text("foo-bin 1.0 -> 1.1\nbaz-git r1 -> r2\n")
-(stateDir / "updates_appman").write_text("someapp 1.2.0 -> 1.3.0\n")
-(stateDir / "updates_all").write_text(
-    "bar 2.0-1 -> 2.1-1\nfoo-bin 1.0 -> 1.1\nbaz-git r1 -> r2\nsomeapp 1.2.0 -> 1.3.0\n")
-(stateDir / "last_check").write_text(f"{int(time.time()) - 600}\n")
+
+
+def writeState(updatesBySource: dict[str, list[str]]):
+    """What the updater writes after a check."""
+    allLines = []
+    for key in ("repo", "aur", "flatpak", "appimage", "appman"):
+        lines = updatesBySource.get(key, [])
+        (stateDir / f"updates_{key}").write_text("".join(f"{line}\n" for line in lines))
+        allLines += lines
+    (stateDir / "updates_all").write_text("".join(f"{line}\n" for line in allLines))
+    (stateDir / "last_check").write_text(f"{int(time.time()) - 600}\n")
+    (stateDir / "tray_icon").write_text(
+        "cachy-update_updates-available-blue\n" if allLines else "cachy-update-blue\n")
+
+
+writeState({"repo": ["bar 2.0-1 -> 2.1-1"], "aur": ["foo-bin 1.0 -> 1.1", "baz-git r1 -> r2"],
+            "appman": ["someapp 1.2.0 -> 1.3.0"]})
 
 sys.path.insert(0, str(REPO_ROOT / "src"))
 from shellyupdate import tray  # noqa: E402
@@ -60,11 +76,6 @@ def menuTexts(trayApp):
     return [action.text() for action in trayApp.menu.actions()]
 
 
-def subMenus(trayApp):
-    return {action.text(): [item.text() for item in action.menu().actions()]
-            for action in trayApp.menu.actions() if action.menu()}
-
-
 check("kdeIconTheme reads kdeglobals", tray.kdeIconTheme() == "Papirus-Dark")
 
 app = tray.QApplication(sys.argv)
@@ -73,18 +84,22 @@ check("applyIconTheme uses KDE's theme when Qt has none", tray.QIcon.themeName()
 
 trayApp = tray.TrayApp(app)
 check("tooltip shows the total", "4 updates available" in trayApp.tray.toolTip())
+check("icon: updates available", trayApp.iconName(4) == "cachy-update_updates-available-blue")
+check("the tray is shown", trayApp.tray.isVisible())
 
 trayApp.buildMenu()
-texts, menus = menuTexts(trayApp), subMenus(trayApp)
+texts = menuTexts(trayApp)
 print("      menu:", texts)
-check("menu shows the total", "4 updates available" in texts)
-check("Repositories (1) submenu", menus.get("Repositories (1)") == ["bar 2.0-1 -> 2.1-1"])
-check("AUR (2) submenu", menus.get("AUR (2)") == ["foo-bin 1.0 -> 1.1", "baz-git r1 -> r2"])
-check("AppMan (1) submenu", menus.get("AppMan (1)") == ["someapp 1.2.0 -> 1.3.0"])
-check("no submenu for an empty source", not any(text.startswith("Flatpak") for text in texts))
-check("submenus in source order", [t for t in texts if "(" in t] == ["Repositories (1)", "AUR (2)", "AppMan (1)"])
-check("last check", "Last check 10 min ago" in texts)
-check("fixed actions", {"Run CachyOS-Shelly-Update", "Check for updates", "Quit"} <= set(texts))
+check("menu starts with the total", texts[0] == "4 updates available")
+check("one entry per source with updates, count only, in order",
+      [t for t in texts if t.endswith(")")] == ["Packages (1)", "AUR (2)", "AppMan (1)"])
+check("no submenus (no package lists)", not any(action.menu() for action in trayApp.menu.actions()))
+check("no entry for sources without updates",
+      not any(t.startswith(("Flatpak", "AppImage")) for t in texts))
+check("last check in cachy-update's format", "Last check 10m ago" in texts)
+check("next check from the systemd timer", any(t.startswith("Next check in 59m") for t in texts))
+check("cachy-update's fixed actions, in order",
+      texts[-3:] == ["Run CachyOS-Shelly-Update", "Check for updates", "Exit"])
 
 # "Run" opens the updater in the desktop's default terminal (ghostty here,
 # even though alacritty is installed too)
@@ -98,19 +113,23 @@ print("      launched:", launched)
 check("Run opens the KDE default terminal with the updater",
       launched == "ghostty -e /opt/cachyos-shelly-update/bin/cachyos-shelly-update --wait")
 
-# Long lists are cut off
-(stateDir / "updates_aur").write_text("".join(f"pkg{i} 1 -> 2\n" for i in range(45)))
-trayApp.buildMenu()
-aurItems = subMenus(trayApp).get("AUR (45)", [])
-check("submenu limited to 40 items plus a note", len(aurItems) == 41 and aurItems[-1] == "... and 5 more")
-
-# Up to date
-for fileName in ("updates_repo", "updates_aur", "updates_appman", "updates_all"):
-    (stateDir / fileName).write_text("")
+# Up to date: the icon, tooltip and menu follow the new state
+writeState({})
 trayApp.refresh()
 trayApp.buildMenu()
+texts = menuTexts(trayApp)
+check("up to date: icon changes back", trayApp.iconName(0) == "cachy-update-blue")
 check("up to date: tooltip", "System is up to date" in trayApp.tray.toolTip())
-check("up to date: menu", "System is up to date" in menuTexts(trayApp))
+check("up to date: menu", texts[0] == "System is up to date")
+check("up to date: no source entries", not any(t.endswith(")") for t in texts))
+
+# cachy-update's ShowTrayWhenRelevant: hidden while up to date
+archUpdateConfig.write_text("ShowTrayWhenRelevant\n")
+trayApp.refresh()
+check("ShowTrayWhenRelevant hides the icon when up to date", not trayApp.tray.isVisible())
+writeState({"flatpak": ["App 1.0"]})
+trayApp.refresh()
+check("ShowTrayWhenRelevant shows it again when there are updates", trayApp.tray.isVisible())
 
 print()
 if failures:

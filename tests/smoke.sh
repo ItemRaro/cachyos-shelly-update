@@ -20,20 +20,44 @@ mkdir -p "$HOME" "$XDG_RUNTIME_DIR" "$TEMP_DIR/bin"
 STATE_DIR="$XDG_STATE_HOME/cachyos-shelly-update"
 OUTPUT_FILE="$TEMP_DIR/output"
 
-# Fake shelly: list-updates prints $FAKE_<SOURCE>, upgrade logs its arguments
-cat > "$TEMP_DIR/bin/shelly" <<'EOF'
-#!/usr/bin/env bash
-if [[ ${1:-} == list-updates ]]; then
-    case $2 in
-        standard) printf '%s' "${FAKE_STANDARD:-}" ;;
-        aur)      printf '%s' "${FAKE_AUR:-}" ;;
-        appimage) printf '%s' "${FAKE_APPIMAGE:-}" ;;
-    esac
-    exit 0
-fi
-printf '%s\n' "$*" > "$SHELLY_LOG"
-exit "${FAKE_UPGRADE_RC:-0}"
-EOF
+# Fake shelly, shaped like Shelly 3.x: "list-updates <source> --json" prints
+# $FAKE_<SOURCE> ("name old -> new" lines) as Shelly's JSON; without --json
+# it prints Shelly's human table and "nothing to do" messages, which must
+# never be counted as updates. "upgrade" logs its arguments.
+cat > "$TEMP_DIR/bin/shelly" <<'PYEOF'
+#!/usr/bin/env python3
+import json, os, sys
+arguments = sys.argv[1:]
+if arguments[:1] == ["list-updates"]:
+    source = arguments[1]
+    lines = [line.split() for line in os.environ.get(f"FAKE_{source.upper()}", "").splitlines()]
+    updates = [fields for fields in lines if len(fields) == 4 and fields[2] == "->"]
+    if "--json" not in arguments:
+        if not updates:
+            print({"aur": "All AUR packages are up to date.",
+                   "appimage": "No appimage updates available"}.get(source, ""))
+        else:
+            print("┌──────┬───────────┬───────────┐\n│ Name │ Installed │ Available │")
+            for name, old, _, new in updates:
+                print(f"│ {name} │ {old} │ {new} │")
+            print(f"└──────┴───────────┴───────────┘\n{len(updates)} packages can be updated")
+    elif source == "appimage":
+        print(json.dumps([{"Name": name, "Version": new, "IsUpdateAvailable": True}
+                          for name, _, _, new in updates]
+                         + [{"Name": "uptodate.AppImage", "Version": "1.0", "IsUpdateAvailable": False}]))
+    else:
+        print(json.dumps([{"Name": name, "Version": old, "NewVersion": new} for name, old, _, new in updates]))
+    sys.exit(0)
+with open(os.environ["SHELLY_LOG"], "w") as log:
+    log.write(" ".join(arguments) + "\n")
+sys.exit(int(os.environ.get("FAKE_UPGRADE_RC", "0")))
+PYEOF
+# Fake checkupdates: the repositories come from $FAKE_STANDARD
+cat > "$TEMP_DIR/bin/checkupdates" <<'SHEOF'
+#!/bin/sh
+printf '%s' "${FAKE_STANDARD:-}"
+SHEOF
+chmod +x "$TEMP_DIR/bin/checkupdates"
 chmod +x "$TEMP_DIR/bin/shelly"
 export PATH="$TEMP_DIR/bin:$PATH" SHELLY_LOG="$TEMP_DIR/shelly.log"
 
@@ -77,14 +101,18 @@ expectExit "unknown option exits 1" 1 "$UPDATER" --does-not-exist
 expectExit "--appman (1.0 option) is still accepted" 0 "$UPDATER" -l --appman --no-flatpak
 
 # ---------- -l with updates ----------
-export FAKE_STANDARD=$'bar 2.0-1 -> 2.1-1\n' FAKE_AUR=$'foo-bin 1.0 -> 1.1\n' FAKE_APPIMAGE=$'No updates available\n'
+export FAKE_STANDARD=$'bar 2.0-1 -> 2.1-1\n' FAKE_AUR=$'foo-bin 1.0 -> 1.1\n' FAKE_APPIMAGE=''
 expectExit "-l exits 0" 0 "$UPDATER" -l --no-flatpak
 expectText "-l lists the repository package" "bar 2.0-1 -> 2.1-1"
 expectText "-l lists the AUR package" "foo-bin 1.0 -> 1.1"
-expectText "-l counts 2 updates (\"No updates\" is filtered out)" "Available updates: 2"
+expectText "-l counts 2 updates (up-to-date AppImages are not updates)" "Available updates: 2"
+expectNoText "-l shows no AppImage update when there is none" "uptodate.AppImage"
 expectNoText "-l hides AppMan when it isn't installed" ":: AppMan"
 if [[ ! -e $SHELLY_LOG ]]; then pass "-l doesn't call shelly upgrade"; else fail "-l called shelly upgrade"; fi
 if [[ $(grep -c . "$STATE_DIR/updates_all") == 2 ]]; then pass "updates_all has 2 lines"; else fail "updates_all: $(cat "$STATE_DIR/updates_all")"; fi
+FAKE_APPIMAGE=$'Tool.AppImage 1.0 -> 2.0\n' expectExit "-l with an AppImage update exits 0" 0 "$UPDATER" -l --no-flatpak
+expectText "-l lists the AppImage update from Shelly's JSON" "Tool.AppImage -> 2.0"
+expectText "-l counts it" "Available updates: 3"
 
 # ---------- -c (timer) ----------
 expectExit "-c exits 0" 0 "$UPDATER" -c --no-flatpak
@@ -230,7 +258,8 @@ expectText "-c saves the \"up to date\" icon" "cachy-update-blue" "$STATE_DIR/tr
 exec 9>"$XDG_RUNTIME_DIR/cachyos-shelly-update.lock"
 flock -n 9
 expectExit "-c with another instance running skips without error" 0 "$UPDATER" -c --no-flatpak
-expectExit "-l with another instance running exits 1" 1 "$UPDATER" -l --no-flatpak
+CACHYOS_SHELLY_UPDATE_LOCK_TIMEOUT=1 expectExit "-l gives up after waiting for another instance" 1 "$UPDATER" -l --no-flatpak
+expectText "-l says it is waiting for the background check" "Waiting for the background check to finish"
 exec 9>&-
 
 # ---------- install.sh (the interface only, nothing is installed) ----------

@@ -21,7 +21,7 @@ LOCK_FILE = RUN_DIR / f"{APP_NAME}.lock"
 # (key, title) of every update source, in display order. The key names the
 # state file (updates_<key>) and the --no-<key> option.
 SOURCES = (
-    ("repo", "Repositories"),
+    ("repo", "Packages"),
     ("aur", "AUR"),
     ("flatpak", "Flatpak"),
     ("appimage", "AppImage"),
@@ -34,6 +34,7 @@ ICON_STYLES = ("blue", "light", "dark")
 DEFAULT_ICON_STYLE = "blue"
 TRAY_ICON_STYLE_PATTERN = re.compile(r"^\s*TrayIconStyle\s*=\s*(\S*)\s*$")
 COLORBLIND_MODE_PATTERN = re.compile(r"^\s*ColorblindMode\s*$")
+SHOW_TRAY_WHEN_RELEVANT_PATTERN = re.compile(r"^\s*ShowTrayWhenRelevant\s*$")
 
 
 def stateFile(name: str) -> Path:
@@ -64,28 +65,36 @@ def updatesAvailableText(count: int) -> str:
     return "1 update available" if count == 1 else f"{count} updates available"
 
 
-def humanDuration(seconds: float) -> str:
-    totalSeconds = int(abs(seconds))
-    if totalSeconds < 60:
-        return "less than 1 min"
-    if totalSeconds < 3600:
-        return f"{totalSeconds // 60} min"
-    if totalSeconds < 86400:
-        hours, minutes = divmod(totalSeconds // 60, 60)
-        return f"{hours} h {minutes} min" if minutes else f"{hours} h"
-    days, hours = divmod(totalSeconds // 3600, 24)
-    return f"{days} d {hours} h" if hours else f"{days} d"
+def formatDuration(seconds: float) -> str | None:
+    """cachy-update's format: "1d 2h 5m 3s", leaving out zero parts.
+    None for zero (or negative) durations, which cachy-update doesn't show."""
+    totalSeconds = int(seconds)
+    if totalSeconds <= 0:
+        return None
+    parts = (("d", totalSeconds // 86400), ("h", totalSeconds % 86400 // 3600),
+             ("m", totalSeconds % 3600 // 60), ("s", totalSeconds % 60))
+    return " ".join(f"{value}{unit}" for unit, value in parts if value)
+
+
+def readArchUpdateConfig() -> list[str]:
+    """Lines of cachy-update's arch-update.conf: icon style and tray options
+    are shared with it, so both look and behave the same."""
+    try:
+        return ARCH_UPDATE_CONFIG_FILE.read_text().splitlines()
+    except OSError:
+        return []
+
+
+def showTrayWhenRelevant() -> bool:
+    """cachy-update's ShowTrayWhenRelevant: hide the tray icon when up to date."""
+    return any(SHOW_TRAY_WHEN_RELEVANT_PATTERN.match(line) for line in readArchUpdateConfig())
 
 
 def currentTrayIcon(hasUpdates: bool) -> str:
     """cachy-update's icon names, honoring TrayIconStyle and ColorblindMode
     from arch-update.conf (the last TrayIconStyle line wins)."""
     iconStyle, colorblindSuffix = DEFAULT_ICON_STYLE, ""
-    try:
-        configLines = ARCH_UPDATE_CONFIG_FILE.read_text().splitlines()
-    except OSError:
-        configLines = []
-    for line in configLines:
+    for line in readArchUpdateConfig():
         styleMatch = TRAY_ICON_STYLE_PATTERN.match(line)
         if styleMatch:
             iconStyle = styleMatch.group(1)
