@@ -106,6 +106,8 @@ systemctl --user edit cachyos-shelly-update.timer
 install.sh                         install / update / uninstall / status
 VERSION                            bump on every release (update compares against it)
 requirements.txt                   the tray's Python dependencies (pinned)
+requirements-dev.txt               CI and development tools: ruff, mypy, pytest (pinned)
+ruff.toml, mypy.ini                lint rules and type checking settings
 src/cachyos-shelly-update          launcher (sh): the venv's Python, or python3 if the venv is broken
 src/shellyupdate/                  the Python package:
   core.py                          paths, sources, state files and texts shared by the CLI and the tray
@@ -122,20 +124,21 @@ docs/pt-BR/                        Portuguese documentation
 
 The GitLab pipeline runs on every merge request and every push to `main`:
 
-- **lint**: `shellcheck` on `install.sh` and the test scripts, `ruff` on the Python (rules in `ruff.toml`), and validation of the `.desktop` files and the systemd units.
-- **test**: `tests/test_units.py` tests the package's pieces (the AppMan probe and its timeout, the parallel checks, options, icons, the terminal lookup). `tests/smoke.sh` runs the real updater against fake `shelly` and `appman` commands, with a temporary HOME and no sudo, including AppMan apps built from each template layout. `tests/cachy_update_handoff.sh` checks that installing turns cachy-update off and uninstalling turns back on exactly what was on, with fake `systemctl`; `tests/installer_tools.sh` checks the optional tools (yay, Flatpak + Flathub, AppMan). `tests/self_update.sh` installs every earlier release from git history, updates it with its own `install.sh update` and checks the result equals a fresh install (files, venv, units, tray restart, state), plus the launcher's fallback to `python3`. `tests/tray_smoke.py` builds the tray and its menu without a display, and checks that "Run" opens the KDE default terminal.
+- **lint**: `shellcheck` on `install.sh`, the launcher and the test scripts; `ruff` on the Python (rules in `ruff.toml`); `mypy`, strict on the package (every function typed) and on the tests' code (`mypy.ini`); and validation of the `.desktop` files and the systemd units.
+- **test**: `tests/test_units.py` (run with pytest, so the merge request shows the test report and the unit tests' coverage) tests the package's pieces (the AppMan probe and its timeout, the parallel checks, options, icons, the terminal lookup). `tests/smoke.sh` runs the real updater against fake `shelly` and `appman` commands, with a temporary HOME and no sudo, including AppMan apps built from each template layout. `tests/cachy_update_handoff.sh` checks that installing turns cachy-update off and uninstalling turns back on exactly what was on, with fake `systemctl`; `tests/installer_tools.sh` checks the optional tools (yay, Flatpak + Flathub, AppMan). `tests/self_update.sh` installs every earlier release from git history, updates it with its own `install.sh update` and checks the result equals a fresh install (files, venv, units, tray restart, state), plus the launcher's fallback to `python3`. `tests/tray_smoke.py` builds the tray and its menu without a display, and checks that "Run" opens the KDE default terminal.
 
 To run them locally:
 
 ```bash
 shellcheck install.sh tests/*.sh src/cachyos-shelly-update
+pip install -r requirements.txt -r requirements-dev.txt
 ruff check .
-PYTHONPATH=src python -m unittest discover -s tests -p "test_*.py"
+mypy
+PYTHONPATH=src python -m pytest tests/test_units.py   # or: python -m unittest discover -s tests
 bash tests/smoke.sh
 bash tests/cachy_update_handoff.sh
 bash tests/installer_tools.sh
 bash tests/self_update.sh         # in a container: it runs as a throwaway user when root
-pip install -r requirements.txt
 PYTHONPATH=src QT_QPA_PLATFORM=offscreen python tests/tray_smoke.py
 ```
 

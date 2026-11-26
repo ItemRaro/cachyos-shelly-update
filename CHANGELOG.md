@@ -9,6 +9,20 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- CI: jobs pick the shared runners by their full tag lists (`docker, linux,
+  amd64, shellscript|python`). New `mypy` job, strict on the package; ruff
+  checks more rules (pyupgrade, simplifications, comprehensions,
+  performance, ruff's own). Unit tests run under pytest, and the merge
+  request shows their report and coverage. The tools are pinned in
+  `requirements-dev.txt`.
+- The single-instance locks use a plain file descriptor (`os.open`)
+  instead of an open file object.
+
+### Fixed
+- The tray test failed now and then on a slow machine: it expected the
+  "last check" and "next check" times to the exact second.
+
 ## [2.2.0] - 2026-11-26
 
 ### Changed

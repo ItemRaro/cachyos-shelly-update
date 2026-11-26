@@ -9,6 +9,21 @@ e o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+### Alterado
+- CI: os jobs escolhem os runners compartilhados pela lista completa de tags
+  (`docker, linux, amd64, shellscript|python`). Novo job `mypy`, estrito no
+  pacote; o ruff confere mais regras (pyupgrade, simplificações,
+  comprehensions, desempenho, as próprias do ruff). Os testes unitários
+  rodam no pytest, e o merge request mostra o relatório e a cobertura deles.
+  As ferramentas ficam fixadas no `requirements-dev.txt`.
+- As travas de instância única usam um descritor de arquivo simples
+  (`os.open`) em vez de um objeto de arquivo aberto.
+
+### Corrigido
+- O teste da bandeja falhava de vez em quando numa máquina lenta: ele
+  esperava os horários de "última verificação" e "próxima verificação"
+  exatos no segundo.
+
 ## [2.2.0] - 2026-11-26
 
 ### Alterado

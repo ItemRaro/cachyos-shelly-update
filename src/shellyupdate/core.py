@@ -5,6 +5,7 @@ Standard library only, and cheap to import: the timer runs the CLI often.
 
 import os
 import re
+from collections.abc import Iterable
 from pathlib import Path
 
 APP_NAME = "cachyos-shelly-update"
@@ -57,7 +58,13 @@ def writeStateFile(name: str, content: str) -> None:
     temporary.replace(target)
 
 
-def countUpdates(keys) -> int:
+def openLockFile(path: Path) -> int:
+    """A descriptor for an flock()-based lock file. Only the descriptor is
+    needed (nothing is ever written), and it isn't inherited by children."""
+    return os.open(path, os.O_WRONLY | os.O_CREAT, 0o644)
+
+
+def countUpdates(keys: Iterable[str]) -> int:
     return sum(len(readLines(f"updates_{key}")) for key in keys)
 
 
