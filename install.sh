@@ -7,7 +7,8 @@
 #   ./install.sh uninstall   remove it (see --purge)
 #   ./install.sh status      show what is installed
 #
-# Options:  -y | --yes   don't ask anything (pacman/yay get --noconfirm)
+# Options:  -y | --yes   don't ask anything: install the optional tools, and
+#                        pacman/yay get --noconfirm
 #           --purge      (uninstall) also delete the user's state and config, and
 #                        offer to remove the packages and AppMan this installer added
 #
@@ -38,17 +39,21 @@ readonly INSTALLED_PACKAGES_FILE=$PREFIX/installed-packages
 # Set when this installer downloaded AppMan (holds its path)
 readonly INSTALLED_APPMAN_FILE=$PREFIX/installed-appman
 readonly APPMAN_URL=https://raw.githubusercontent.com/ivan-hc/AM/main/APP-MANAGER
+# Optional tools the user said no to, so a reinstall/update doesn't ask again
+readonly DECLINED_TOOLS_FILE=$PREFIX/declined-tools
+readonly FLATHUB_URL=https://dl.flathub.org/repo/flathub.flatpakrepo
+readonly YAY_AUR_URL=https://aur.archlinux.org/yay-bin.git
 SOURCE_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 readonly SOURCE_DIR
 
-# dependency | repository package | AUR package (for yay) | required or optional
+# dependency | repository package | AUR package (for an AUR helper) | required or optional
 # "pacman -T" also accepts packages that provide the dependency (e.g. shelly-bin).
 # The optional ones are tools AppMan uses to unpack apps; without them it
 # stops to ask whether to download static copies.
+# Flatpak, an AUR helper and AppMan are asked about separately (see
+# "optional tools"): the updater skips whatever isn't there.
 readonly DEPENDENCIES=(
     "shelly|shelly|shelly-bin|required"
-    "shelly-flatpak-backend|shelly-flatpak-backend|shelly-flatpak-backend-bin|required"
-    "flatpak|flatpak||required"
     "python|python||required"
     "pacman-contrib|pacman-contrib||required"
     "libnotify|libnotify||required"
@@ -118,7 +123,10 @@ asUser() {
 confirm() {
     ((assumeYes)) && return 0
     local answer defaultAnswer="${2:-Y}"
-    read -rp "$(printf '%s::%s %s [%s] ' "$CYAN$BOLD" "$RESET" "$1" "$([[ $defaultAnswer == Y ]] && echo Y/n || echo y/N)")" answer
+    # printf, not "read -p": read only shows its prompt when stdin is a terminal
+    printf '%s::%s %s [%s] ' "$CYAN$BOLD" "$RESET" "$1" "$([[ $defaultAnswer == Y ]] && echo Y/n || echo y/N)"
+    read -r answer || answer=""
+    [[ -t 0 ]] || echo
     answer="${answer,,}"
     [[ -z $answer ]] && answer="${defaultAnswer,,}"
     [[ $answer == y || $answer == yes ]]
@@ -127,44 +135,132 @@ confirm() {
 # ---------- dependencies ----------
 isSatisfied()  { pacman -T "$1" >/dev/null 2>&1; }
 isInRepos()    { [[ -n $1 ]] && pacman -Si "$1" >/dev/null 2>&1; }
-hasYay()       { command -v yay >/dev/null 2>&1; }
+# The installed AUR helper (yay or paru), if any
+aurHelper() {
+    local helper
+    for helper in yay paru; do
+        command -v "$helper" >/dev/null 2>&1 && { echo "$helper"; return 0; }
+    done
+    return 1
+}
+noConfirmArgs() { ((assumeYes)) && echo --noconfirm; return 0; }
+
+# installPackage <dependency> <repository package> [AUR package]: from the
+# repositories first, the AUR (through yay/paru) otherwise. Records what it added.
+installPackage() {
+    local dependency=$1 repoPackage=$2 aurPackage=${3:-} helper noConfirm=()
+    mapfile -t noConfirm < <(noConfirmArgs)
+    isSatisfied "$dependency" && return 0
+    if isInRepos "$repoPackage"; then
+        printStep "$dependency: installing with pacman"
+        asRoot pacman -S --needed "${noConfirm[@]}" "$repoPackage" || return 1
+        newlyInstalledPackages+=("$repoPackage")
+        return 0
+    fi
+    if [[ -n $aurPackage ]] && helper="$(aurHelper)" && [[ -n $TARGET_UID ]]; then
+        printStep "$dependency: not in the repositories; installing $aurPackage with $helper (AUR)"
+        asUser "$helper" -S --needed "${noConfirm[@]}" "$aurPackage" || return 1
+        newlyInstalledPackages+=("$aurPackage")
+        return 0
+    fi
+    return 1
+}
 
 ensureDependencies() {
     printInfo "Checking dependencies"
-    local entry dependency repoPackage aurPackage requirement noConfirm=()
-    ((assumeYes)) && noConfirm=(--noconfirm)
-    if hasYay; then
-        printStep "yay found: $(yay --version 2>/dev/null | head -1)"
-    else
-        printStep "yay not found (only the official repositories will be used)"
-    fi
-
+    local entry dependency repoPackage aurPackage requirement
     for entry in "${DEPENDENCIES[@]}"; do
         IFS='|' read -r dependency repoPackage aurPackage requirement <<<"$entry"
         if isSatisfied "$dependency"; then
             printStep "$dependency: ${GREEN}ok${RESET}"
-            continue
-        fi
-        if isInRepos "$repoPackage"; then
-            printStep "$dependency: installing with pacman"
-            if asRoot pacman -S --needed "${noConfirm[@]}" "$repoPackage"; then
-                newlyInstalledPackages+=("$repoPackage")
-                continue
+        elif ! installPackage "$dependency" "$repoPackage" "$aurPackage"; then
+            if [[ $requirement == optional ]]; then
+                printWarning "$dependency could not be installed (optional, used by AppMan)."
+            else
+                die "Could not install $dependency${aurPackage:+ (repositories, or $aurPackage from the AUR with yay/paru)}."
             fi
-        elif [[ -n $aurPackage ]] && hasYay; then
-            [[ -n $TARGET_UID ]] || die "$dependency needs yay, which doesn't run as root. Run this script as your user."
-            printStep "$dependency: not in the repositories; installing $aurPackage with yay (AUR)"
-            if asUser yay -S --needed "${noConfirm[@]}" "$aurPackage"; then
-                newlyInstalledPackages+=("$aurPackage")
-                continue
-            fi
-        fi
-        if [[ $requirement == optional ]]; then
-            printWarning "$dependency could not be installed (optional, used by AppMan)."
-        else
-            die "Could not install $dependency${aurPackage:+ (repositories or $aurPackage from the AUR with yay)}."
         fi
     done
+}
+
+# ---------- optional tools ----------
+# Asked about once; a "no" is remembered until uninstall, so updates don't
+# ask again. With -y everything is installed.
+wasDeclined() { grep -qxF "$1" "$DECLINED_TOOLS_FILE" 2>/dev/null; }
+recordDeclined() {
+    printf '%s\n' "$1" | asRoot tee -a "$DECLINED_TOOLS_FILE" >/dev/null
+    printStep "skipped (run '$PREFIX/install.sh install' again after deleting $DECLINED_TOOLS_FILE to be asked again)"
+}
+# offerTool <key> "<question>": true when the user wants it
+offerTool() {
+    wasDeclined "$1" && return 1
+    echo
+    if confirm "$2" Y; then return 0; fi
+    recordDeclined "$1"
+    return 1
+}
+
+# yay: from the repositories when it's there (CachyOS has it), otherwise
+# built from the AUR (yay-bin) as the user, the way yay's README does it
+offerAurHelper() {
+    local helper buildDir
+    if helper="$(aurHelper)"; then
+        printStep "AUR helper: ${GREEN}$helper${RESET}"
+        return 0
+    fi
+    offerTool yay "No AUR helper found. Install yay (installs AUR packages Shelly needs that aren't in the repositories)?" || return 0
+    if installPackage yay yay; then
+        printStep "yay: ${GREEN}installed${RESET}"
+        return 0
+    fi
+    [[ -n $TARGET_UID ]] || { printWarning "yay is built as a normal user; run this script as your user."; return 0; }
+    installPackage git git || { printWarning "git is needed to build yay"; return 0; }
+    installPackage base-devel base-devel || { printWarning "base-devel is needed to build yay"; return 0; }
+    buildDir="$(asUser mktemp -d)"
+    printStep "yay: building yay-bin from the AUR"
+    if asUser git clone --quiet --depth 1 "$YAY_AUR_URL" "$buildDir/yay-bin" \
+        && (cd "$buildDir/yay-bin" && asUser makepkg -si --needed --noconfirm); then
+        newlyInstalledPackages+=(yay-bin)
+        printStep "yay: ${GREEN}installed${RESET}"
+    else
+        printWarning "could not build yay; AUR packages will only come from Shelly"
+    fi
+    asUser rm -rf "$buildDir"
+}
+
+hasFlathub() { flatpak remotes --columns=name 2>/dev/null | grep -qx flathub; }
+
+# Flatpak, Shelly's Flatpak backend (Shelly updates Flatpak apps through it)
+# and the Flathub remote
+offerFlatpak() {
+    if ! isSatisfied flatpak; then
+        offerTool flatpak "Flatpak isn't installed. Install it, with Shelly's Flatpak backend and Flathub?" || return 0
+        installPackage flatpak flatpak || { printWarning "could not install flatpak"; return 0; }
+        installPackage shelly-flatpak-backend shelly-flatpak-backend shelly-flatpak-backend-bin \
+            || printWarning "could not install shelly-flatpak-backend; Shelly won't update Flatpak apps"
+        addFlathub
+        return 0
+    fi
+    printStep "flatpak: ${GREEN}ok${RESET}"
+    if ! isSatisfied shelly-flatpak-backend \
+        && offerTool flatpak-backend "Shelly's Flatpak backend is missing (Shelly needs it to update Flatpak apps). Install it?"; then
+        installPackage shelly-flatpak-backend shelly-flatpak-backend shelly-flatpak-backend-bin \
+            || printWarning "could not install shelly-flatpak-backend"
+    fi
+    if hasFlathub; then
+        printStep "flathub: ${GREEN}ok${RESET}"
+    elif offerTool flathub "Flatpak has no Flathub remote. Add Flathub?"; then
+        addFlathub
+    fi
+}
+
+addFlathub() {
+    hasFlathub && return 0
+    if asRoot flatpak remote-add --if-not-exists flathub "$FLATHUB_URL"; then
+        printStep "flathub: ${GREEN}added${RESET}"
+    else
+        printWarning "could not add Flathub"
+    fi
 }
 
 # Remember every package we installed, across reinstalls
@@ -196,13 +292,13 @@ findAppman() {
 # AppMan has no package: its official installer just downloads the
 # APP-MANAGER script as ~/.local/bin/appman, which is what we do here.
 # It is not configured: the first "appman -i <app>" asks where to keep apps.
-ensureAppman() {
-    printInfo "Checking AppMan"
+offerAppman() {
     local appmanPath binDir downloadFile
     if appmanPath="$(findAppman)"; then
         printStep "appman: ${GREEN}ok${RESET} ($appmanPath)"
         return 0
     fi
+    offerTool appman "AppMan isn't installed. Install it (installs and updates AppImages, updated here too)?" || return 0
     if [[ -z $TARGET_UID ]]; then
         printWarning "AppMan is per user and can't be installed for root. Run this script as your user to get it."
         return 0
@@ -487,11 +583,17 @@ cmdInstall() {
     printInfo "$APP_NAME $(cat "$SOURCE_DIR/VERSION")${installedVersion:+ (installed: $installedVersion)}"
 
     ((EUID != 0)) && { sudo -v || die "sudo is required"; }
-    ensureDependencies
     asRoot mkdir -p "$PREFIX"
+    printInfo "Checking optional tools"
+    offerAurHelper              # first: the dependencies may need it for the AUR
+    ensureDependencies
+    printInfo "Checking Flatpak"
+    offerFlatpak
     recordInstalledPackages
     installFiles
-    ensureAppman
+    printInfo "Checking AppMan"
+    offerAppman
+    recordInstalledPackages
     disableCachyUpdate
     enableServices
     checkIcons
@@ -647,7 +749,15 @@ cmdStatus() {
             printStep "$dependency: ${RED}missing${RESET} ($requirement)"
         fi
     done
-    if hasYay; then printStep "yay: ${GREEN}ok${RESET}"; else printStep "yay: not installed"; fi
+    local helper
+    if helper="$(aurHelper)"; then printStep "AUR helper: ${GREEN}$helper${RESET}"; else printStep "AUR helper: not installed"; fi
+    if isSatisfied flatpak; then
+        printStep "flatpak: ${GREEN}ok${RESET}"
+        if isSatisfied shelly-flatpak-backend; then printStep "shelly-flatpak-backend: ${GREEN}ok${RESET}"; else printStep "shelly-flatpak-backend: missing"; fi
+        if hasFlathub; then printStep "flathub: ${GREEN}ok${RESET}"; else printStep "flathub: not added"; fi
+    else
+        printStep "flatpak: not installed"
+    fi
     if appmanPath="$(findAppman)"; then printStep "appman: ${GREEN}ok${RESET} ($appmanPath)"; else printStep "appman: not installed"; fi
     if "$VENV_DIR/bin/python" -c 'import PyQt6' 2>/dev/null; then
         printStep "tray virtualenv: ${GREEN}ok${RESET}"

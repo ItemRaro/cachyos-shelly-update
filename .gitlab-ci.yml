@@ -9,7 +9,8 @@
 #           smoke      tests/smoke.sh drives the real updater against fake
 #                      `shelly`/`appman` commands (black box, from 1.x)
 #           installer  tests/cachy_update_handoff.sh checks install.sh turning
-#                      cachy-update off and back on
+#                      cachy-update off and back on; tests/installer_tools.sh
+#                      the optional tools (yay, Flatpak + Flathub, AppMan)
 #           tray       tests/tray_smoke.py builds the PyQt6 tray headless
 #
 # Runners: bash/data jobs on the shared shell runner (tags: docker,
@@ -112,6 +113,7 @@ installer:
   needs: [shellcheck]
   script:
     - bash tests/cachy_update_handoff.sh
+    - bash tests/installer_tools.sh
 
 tray:
   extends: .python
