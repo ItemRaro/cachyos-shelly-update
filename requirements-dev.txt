@@ -1,0 +1,6 @@
+# Development and CI tools (not installed on users' machines).
+# Pinned so a new release can't turn the pipeline red on its own; bump on purpose.
+ruff==0.16.10
+mypy==2.4.1
+pytest==9.2.0
+pytest-cov==7.1.0

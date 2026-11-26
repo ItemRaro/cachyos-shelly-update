@@ -2,37 +2,39 @@
 # GitLab CI configuration for cachyos-shelly-update
 #
 # Stages:
-#   lint  - shellcheck (install.sh and the test scripts), ruff (Python, rules
-#           in ruff.toml), and validation of the .desktop files and systemd units
+#   lint  - shellcheck  install.sh, the launcher and the test scripts
+#           ruff        Python lint (rules in ruff.toml)
+#           mypy        type check: the package strictly, the tests too (mypy.ini)
+#           data_files  the .desktop files and the systemd units
 #   test  - everything runs the real code without touching a system:
-#           unit       tests/test_units.py, the package's pieces (stdlib only)
-#           smoke      tests/smoke.sh drives the real updater against fake
-#                      `shelly`/`appman` commands (black box, from 1.x)
-#           installer  tests/cachy_update_handoff.sh checks install.sh turning
-#                      cachy-update off and back on; tests/installer_tools.sh
-#                      the optional tools (yay, Flatpak + Flathub, AppMan)
+#           unit        tests/test_units.py, the package's pieces, under pytest
+#                       (test report and coverage shown in the merge request)
+#           smoke       tests/smoke.sh drives the real updater against fake
+#                       `shelly`/`appman` commands (black box, from 1.x)
+#           installer   tests/cachy_update_handoff.sh checks install.sh turning
+#                       cachy-update off and back on; tests/installer_tools.sh
+#                       the optional tools (yay, Flatpak + Flathub, AppMan)
 #           self_update tests/self_update.sh updates every earlier release
-#                      to this tree and compares it with a fresh install
-#           tray       tests/tray_smoke.py builds the PyQt6 tray headless
+#                       to this tree and compares it with a fresh install
+#           tray        tests/tray_smoke.py builds the PyQt6 tray headless
 #
-# Runners: bash/data jobs on the shared shell runner (tags: docker,
-# shellscript), Python jobs on the shared Python runner (docker, python).
+# Runners: the shared amd64 runners, selected by their full tag lists:
+# shellscript-main (bash and data jobs) and python-main (Python jobs).
 # Images must be on each runner's allowed_images list.
 #
-# PyQt6 comes from requirements.txt, the same pin install.sh puts in the
-# tray's virtualenv.
+# Tool versions are pinned in requirements-dev.txt, PyQt6 in requirements.txt
+# (the same pin install.sh puts in the virtualenv).
 #
 # python:3.14-trixie: CachyOS ships Python 3.14, and the PyQt6 wheels need
 # glibc >= 2.34 (x86_64) / 2.39 (aarch64), which bookworm (2.36) only half
-# covers. --only-binary makes a missing wheel fail fast instead of trying a
-# source build that needs qmake.
+# covers. PIP_ONLY_BINARY makes a missing wheel fail fast instead of trying
+# a source build that needs qmake.
 
 variables:
   PIP_CACHE_DIR: $CI_PROJECT_DIR/.cache/pip
   PIP_DISABLE_PIP_VERSION_CHECK: '1'
   PIP_ROOT_USER_ACTION: ignore
-  # Pinned so a new release can't turn the pipeline red on its own; bump on purpose.
-  RUFF_VERSION: '0.16.10'
+  PIP_ONLY_BINARY: ':all:'
   PYTHON_IMAGE: python:3.14-trixie
   SHELLCHECK_IMAGE: koalaman/shellcheck-alpine:v0.10.0
 
@@ -46,21 +48,24 @@ stages:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
 
+.shell:
+  extends: .rules
+  tags: [docker, linux, amd64, shellscript]
+  cache: []
+
 .python:
   extends: .rules
   image: $PYTHON_IMAGE
-  tags: [docker, python]
+  tags: [docker, linux, amd64, python]
   cache:
     key: pip-$CI_JOB_NAME
     paths:
       - .cache/pip/
 
 shellcheck:
-  extends: .rules
+  extends: .shell
   stage: lint
   image: $SHELLCHECK_IMAGE
-  tags: [docker, shellscript]
-  cache: []
   script:
     - shellcheck --version
     - shellcheck install.sh tests/*.sh src/cachyos-shelly-update
@@ -69,16 +74,23 @@ ruff:
   extends: .python
   stage: lint
   script:
-    - 'pip install --quiet --only-binary=:all: "ruff==$RUFF_VERSION"'
+    - pip install --quiet "$(grep '^ruff==' requirements-dev.txt)"
     - ruff --version
     - ruff check --output-format=full .
 
+# PyQt6 is installed for its type stubs (tray.py), not run
+mypy:
+  extends: .python
+  stage: lint
+  script:
+    - pip install --quiet -r requirements.txt "$(grep '^mypy==' requirements-dev.txt)"
+    - mypy --version
+    - mypy
+
 data_files:
-  extends: .rules
+  extends: .shell
   stage: lint
   image: debian:bookworm
-  tags: [docker, shellscript]
-  cache: []
   script:
     - apt-get update -qq
     - apt-get install -y -qq --no-install-recommends desktop-file-utils systemd >/dev/null
@@ -89,29 +101,40 @@ data_files:
     - mkdir -p /tmp/xdg && chmod 700 /tmp/xdg
     - XDG_RUNTIME_DIR=/tmp/xdg systemd-analyze --user verify data/cachyos-shelly-update.service data/cachyos-shelly-update.timer
 
+# Coverage is of the unit tests alone: smoke.sh and the tray test run the
+# code in their own processes. Shown in the merge request, not enforced.
 unit:
   extends: .python
   stage: test
-  needs: [ruff]
-  cache: []
+  needs: [ruff, mypy]
   script:
+    - pip install --quiet "$(grep '^pytest==' requirements-dev.txt)" "$(grep '^pytest-cov==' requirements-dev.txt)"
     - python --version
-    - PYTHONPATH=src python -m unittest discover -v -s tests -p "test_*.py"
+    - >-
+      PYTHONPATH=src python -m pytest -v tests/test_units.py
+      --junitxml=unit-report.xml
+      --cov=shellyupdate --cov-report=term --cov-report=xml:coverage.xml
+  coverage: '/^TOTAL\s+.*\s(\d+(?:\.\d+)?)%$/'
+  artifacts:
+    when: always
+    reports:
+      junit: unit-report.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
 
 smoke:
   extends: .python
   stage: test
-  needs: [ruff]
+  needs: [ruff, mypy]
   cache: []
   script:
     - bash tests/smoke.sh
 
 installer:
-  extends: .rules
+  extends: .shell
   stage: test
   image: bash:5
-  tags: [docker, shellscript]
-  cache: []
   needs: [shellcheck]
   script:
     - bash tests/cachy_update_handoff.sh
@@ -135,7 +158,7 @@ self_update:
 tray:
   extends: .python
   stage: test
-  needs: [ruff]
+  needs: [ruff, mypy]
   variables:
     QT_QPA_PLATFORM: offscreen
   script:
@@ -143,6 +166,6 @@ tray:
     - >-
       apt-get install -y -qq --no-install-recommends
       libgl1 libegl1 libxkbcommon0 libfontconfig1 libdbus-1-3 libglib2.0-0t64 >/dev/null
-    - 'pip install --quiet --only-binary=:all: -r requirements.txt'
+    - pip install --quiet -r requirements.txt
     - python --version
     - PYTHONPATH=src python tests/tray_smoke.py

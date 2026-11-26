@@ -108,6 +108,8 @@ systemctl --user edit cachyos-shelly-update.timer
 install.sh                         instalar / atualizar / remover / status
 VERSION                            aumente a cada release (o update compara com isto)
 requirements.txt                   dependências Python da bandeja (fixadas)
+requirements-dev.txt               ferramentas de CI e desenvolvimento: ruff, mypy, pytest (fixadas)
+ruff.toml, mypy.ini                regras de lint e configuração da checagem de tipos
 src/cachyos-shelly-update          lançador (sh): o Python do venv, ou o python3 se o venv quebrar
 src/shellyupdate/                  o pacote Python:
   core.py                          caminhos, origens, arquivos de estado e textos usados pelo CLI e pela bandeja
@@ -124,20 +126,21 @@ docs/pt-BR/                        documentação em português
 
 O pipeline do GitLab roda em todo merge request e em todo push na `main`:
 
-- **lint**: `shellcheck` no `install.sh` e nos scripts de teste, `ruff` no Python (regras em `ruff.toml`) e validação dos `.desktop` e das unidades systemd.
-- **test**: `tests/test_units.py` testa as partes do pacote (a sonda do AppMan e o limite de tempo, as verificações em paralelo, opções, ícones, a busca do terminal). `tests/smoke.sh` roda o atualizador de verdade contra um `shelly` e um `appman` falsos, com HOME temporário e sem sudo, incluindo apps do AppMan em cada formato de modelo. `tests/cachy_update_handoff.sh` confere, com um `systemctl` falso, que a instalação desliga o cachy-update e que a remoção religa exatamente o que estava ligado; `tests/installer_tools.sh` confere as ferramentas opcionais (yay, Flatpak + Flathub, AppMan). `tests/self_update.sh` instala cada versão anterior do histórico do git, atualiza com o próprio `install.sh update` dela e confere que o resultado é igual a uma instalação nova (arquivos, venv, unidades, reinício da bandeja, estado), além do fallback do lançador para o `python3`. `tests/tray_smoke.py` monta a bandeja e o menu sem tela, e confere que "Run" abre o terminal padrão do KDE.
+- **lint**: `shellcheck` no `install.sh`, no lançador e nos scripts de teste; `ruff` no Python (regras em `ruff.toml`); `mypy`, estrito no pacote (toda função tipada) e no código dos testes (`mypy.ini`); e validação dos `.desktop` e das unidades systemd.
+- **test**: `tests/test_units.py` (rodado com pytest, para o merge request mostrar o relatório dos testes e a cobertura dos testes unitários) testa as partes do pacote (a sonda do AppMan e o limite de tempo, as verificações em paralelo, opções, ícones, a busca do terminal). `tests/smoke.sh` roda o atualizador de verdade contra um `shelly` e um `appman` falsos, com HOME temporário e sem sudo, incluindo apps do AppMan em cada formato de modelo. `tests/cachy_update_handoff.sh` confere, com um `systemctl` falso, que a instalação desliga o cachy-update e que a remoção religa exatamente o que estava ligado; `tests/installer_tools.sh` confere as ferramentas opcionais (yay, Flatpak + Flathub, AppMan). `tests/self_update.sh` instala cada versão anterior do histórico do git, atualiza com o próprio `install.sh update` dela e confere que o resultado é igual a uma instalação nova (arquivos, venv, unidades, reinício da bandeja, estado), além do fallback do lançador para o `python3`. `tests/tray_smoke.py` monta a bandeja e o menu sem tela, e confere que "Run" abre o terminal padrão do KDE.
 
 Para rodar localmente:
 
 ```bash
 shellcheck install.sh tests/*.sh src/cachyos-shelly-update
+pip install -r requirements.txt -r requirements-dev.txt
 ruff check .
-PYTHONPATH=src python -m unittest discover -s tests -p "test_*.py"
+mypy
+PYTHONPATH=src python -m pytest tests/test_units.py   # ou: python -m unittest discover -s tests
 bash tests/smoke.sh
 bash tests/cachy_update_handoff.sh
 bash tests/installer_tools.sh
 bash tests/self_update.sh         # num container: como root, roda com um usuário descartável
-pip install -r requirements.txt
 PYTHONPATH=src QT_QPA_PLATFORM=offscreen python tests/tray_smoke.py
 ```
 
