@@ -30,6 +30,16 @@ SOURCES = (
 )
 SOURCE_KEYS = tuple(key for key, _ in SOURCES)
 SHELLY_SOURCE_KEYS = ("repo", "aur", "flatpak", "appimage")
+# The sources picked in the installer (one key per line), in the install
+# prefix. Missing (e.g. running from the repository) means all of them.
+PICKED_SOURCES_FILE_NAME = "sources"
+
+# Cleanup after the update, through Shelly ("shelly purify"): pacman's cache
+# keeps this many versions of each package. Shelly 3.2.0 added --aur-cache
+# and --disable-cache-clean, which the cleanup needs.
+CACHE_VERSIONS_KEPT = 1
+SHELLY_CLEANUP_VERSION = (3, 2, 0)
+SHELLY_VERSION_PATTERN = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 
 ICON_STYLES = ("blue", "light", "dark")
 DEFAULT_ICON_STYLE = "blue"
@@ -40,6 +50,25 @@ SHOW_TRAY_WHEN_RELEVANT_PATTERN = re.compile(r"^\s*ShowTrayWhenRelevant\s*$")
 
 def stateFile(name: str) -> Path:
     return STATE_DIR / name
+
+
+def readPickedSources(prefix: str) -> set[str] | None:
+    """The sources picked in the installer, or None when there is no choice
+    saved (all sources). Unknown keys are ignored."""
+    try:
+        lines = (Path(prefix) / PICKED_SOURCES_FILE_NAME).read_text().split()
+    except OSError:
+        return None
+    return {key for key in lines if key in SOURCE_KEYS}
+
+
+def parseShellyVersion(text: str) -> tuple[int, int, int] | None:
+    """(3, 4, 1) from "shelly --version" output such as "3.4.1"."""
+    versionMatch = SHELLY_VERSION_PATTERN.search(text)
+    if versionMatch is None:
+        return None
+    major, minor, patch = (int(part) for part in versionMatch.groups())
+    return major, minor, patch
 
 
 def readLines(name: str) -> list[str]:

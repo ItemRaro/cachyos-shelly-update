@@ -9,7 +9,30 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-11-27
+
+### Added
+- Pick the update sources when installing: a list of repositories, AUR,
+  Flatpak, AppImage and AppMan (numbers toggle, Enter applies). A picked
+  source whose tool is missing is offered for install; one left out is
+  never checked, updated or cleaned, even if its tool is installed. Saved
+  in `/opt/cachyos-shelly-update/sources` and kept across updates;
+  `install.sh sources` shows the list again, `install.sh status` lists them.
+- Cleanup after the update (also offered when there is nothing to update),
+  through each source's own tool and only for the picked sources:
+  `shelly purify standard --orphans --cache=1` (orphans, pacman's cache
+  keeping 1 version, corrupted downloads), plus `--aur-cache` only if you
+  say yes; `shelly purify flatpak`; `appman -c`, asked (default yes). Shelly
+  shows what it would remove and asks. Needs Shelly 3.2.0+. With `-y` the
+  commands are printed instead; `--no-cleanup` skips it.
+
 ### Changed
+- `shelly upgrade all` runs with `--disable-cache-clean` (Shelly 3.2.0+):
+  with `-n` it used to clean pacman's cache by itself, keeping 3 versions;
+  the cleanup now does it once.
+- The orphan packages hint after the update is gone: the cleanup handles them.
+- `install.sh install -y` picks every source not turned down before
+  (`declined-tools`) and installs its tools, as it did with the tools.
 - CI: jobs pick the shared runners by their full tag lists (`docker, linux,
   amd64, shellscript|python`). New `mypy` job, strict on the package; ruff
   checks more rules (pyupgrade, simplifications, comprehensions,
@@ -177,7 +200,8 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - PyQt6 tray icon using cachy-update's icons.
 - `install.sh` with install, update, uninstall and status.
 
-[Unreleased]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v2.2.0...main
+[Unreleased]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v2.3.0...main
+[2.3.0]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v2.2.0...v2.3.0
 [2.2.0]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v2.1.0...v2.2.0
 [2.1.0]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v2.0.0...v2.1.0
 [2.0.0]: https://shiva.ddns.net/marcusvinicius/cachyos-shelly-update/-/compare/v1.2.0...v2.0.0

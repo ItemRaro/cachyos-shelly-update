@@ -28,6 +28,9 @@ cat > "$TEMP_DIR/bin/shelly" <<'PYEOF'
 #!/usr/bin/env python3
 import json, os, sys
 arguments = sys.argv[1:]
+if arguments == ["--version"]:
+    print(os.environ.get("FAKE_SHELLY_VERSION", ""))
+    sys.exit(0)
 if arguments[:1] == ["list-updates"]:
     source = arguments[1]
     lines = [line.split() for line in os.environ.get(f"FAKE_{source.upper()}", "").splitlines()]
@@ -48,7 +51,7 @@ if arguments[:1] == ["list-updates"]:
     else:
         print(json.dumps([{"Name": name, "Version": old, "NewVersion": new} for name, old, _, new in updates]))
     sys.exit(0)
-with open(os.environ["SHELLY_LOG"], "w") as log:
+with open(os.environ["SHELLY_LOG"], "a" if os.environ.get("SHELLY_LOG_APPEND") else "w") as log:
     log.write(" ".join(arguments) + "\n")
 sys.exit(int(os.environ.get("FAKE_UPGRADE_RC", "0")))
 PYEOF
@@ -253,6 +256,65 @@ expectExit "-l with no updates exits 0" 0 "$UPDATER" -l --no-flatpak
 expectText "-l reports the system is up to date" "System is up to date"
 expectExit "-c with no updates exits 0" 0 "$UPDATER" -c --no-flatpak
 expectText "-c saves the \"up to date\" icon" "cachy-update-blue" "$STATE_DIR/tray_icon"
+
+# ---------- cleanup after the update (through Shelly and AppMan) ----------
+# Shelly 3.4.1 can clean; every shelly call is kept in the log
+export FAKE_SHELLY_VERSION=3.4.1 SHELLY_LOG_APPEND=1
+rm -f "$SHELLY_LOG" "$APPMAN_LOG"
+expectExit "up to date: cleanup offered, AUR cache yes" 0 "$UPDATER" --no-flatpak < <(printf 'y\n')
+expectText "purges orphans and the cache, keeping 1 version, plus the AUR cache" \
+    "purify standard --orphans --cache=1 --aur-cache" "$SHELLY_LOG"
+expectNoText "no Flatpak cleanup when Flatpak is off" "purify flatpak" "$SHELLY_LOG"
+rm -f "$SHELLY_LOG"
+expectExit "up to date: AUR cache no (default)" 0 "$UPDATER" --no-flatpak < <(printf '\n')
+expectText "purify without the AUR cache" "purify standard --orphans --cache=1" "$SHELLY_LOG"
+expectNoText "the AUR cache is kept" "--aur-cache" "$SHELLY_LOG"
+rm -f "$SHELLY_LOG"
+expectExit "no terminal: cleanup exits 0" 0 "$UPDATER" --no-flatpak < /dev/null
+expectNoText "no terminal: the AUR cache is kept" "--aur-cache" "$SHELLY_LOG"
+rm -f "$SHELLY_LOG"
+expectExit "--no-aur: cleanup without the AUR question" 0 "$UPDATER" --no-flatpak --no-aur < /dev/null
+expectNoText "--no-aur: not asked about the AUR cache" "AUR build cache"
+rm -f "$SHELLY_LOG"
+expectExit "--no-repo --no-aur: no purify standard" 0 "$UPDATER" --no-flatpak --no-repo --no-aur < /dev/null
+if [[ ! -e $SHELLY_LOG ]]; then pass "--no-repo --no-aur: shelly purify not run"; else fail "ran: $(cat "$SHELLY_LOG")"; fi
+rm -f "$SHELLY_LOG"
+expectExit "--no-cleanup exits 0" 0 "$UPDATER" --no-cleanup < <(printf 'y\n')
+if [[ ! -e $SHELLY_LOG ]]; then pass "--no-cleanup runs no cleanup"; else fail "--no-cleanup ran: $(cat "$SHELLY_LOG")"; fi
+expectExit "-y exits 0" 0 "$UPDATER" -y --no-flatpak
+expectText "-y shows the cleanup commands" "shelly purify standard --orphans --cache=1 --aur-cache"
+if [[ ! -e $SHELLY_LOG ]]; then pass "-y runs no cleanup"; else fail "-y ran: $(cat "$SHELLY_LOG")"; fi
+FAKE_SHELLY_VERSION=3.0.3 expectExit "old Shelly: exits 0" 0 "$UPDATER" --no-flatpak < /dev/null
+expectText "old Shelly: says it needs 3.2.0" "needs 3.2.0 or newer"
+if [[ ! -e $SHELLY_LOG ]]; then pass "old Shelly: no purify"; else fail "old Shelly ran: $(cat "$SHELLY_LOG")"; fi
+FAKE_STANDARD=$'bar 2.0-1 -> 2.1-1\n' expectExit "update with Shelly 3.4.1 exits 0" 0 "$UPDATER" --no-flatpak < <(printf 'y\n\n')
+expectText "the upgrade leaves the cache to the cleanup" "-n upgrade all --no-flatpak --disable-cache-clean" "$SHELLY_LOG"
+expectText "then the cleanup runs" "purify standard --orphans --cache=1" "$SHELLY_LOG"
+
+# AppMan set up again: its clean is asked about (default yes)
+printf 'Applications\n' > "$XDG_CONFIG_HOME/appman/appman-config"
+rm -f "$SHELLY_LOG" "$APPMAN_LOG"
+CACHYOS_SHELLY_UPDATE_PROBE_TIMEOUT=2 expectExit "AppMan clean: yes" 0 "$UPDATER" --no-flatpak --no-repo --no-aur < <(printf 'y\n\n')
+expectText "AppMan clean runs appman -c" "-c" "$APPMAN_LOG"
+rm -f "$APPMAN_LOG"
+CACHYOS_SHELLY_UPDATE_PROBE_TIMEOUT=2 expectExit "AppMan clean: no" 0 "$UPDATER" --no-flatpak --no-repo --no-aur < <(printf 'y\nn\n')
+expectNoText "AppMan clean declined" "-c" "$APPMAN_LOG"
+rm -f "$XDG_CONFIG_HOME/appman/appman-config" "$SHELLY_LOG" "$APPMAN_LOG"
+
+# The installer's choice (a "sources" file in the install prefix) limits everything
+INSTALLED_DIR="$TEMP_DIR/opt"
+mkdir -p "$INSTALLED_DIR/bin"
+cp "$UPDATER" "$INSTALLED_DIR/bin/"
+cp -r "$REPO_ROOT/src/shellyupdate" "$INSTALLED_DIR/bin/"
+printf 'repo\nappimage\n' > "$INSTALLED_DIR/sources"
+FAKE_AUR=$'foo-bin 1.0 -> 1.1\n' expectExit "picked sources: -l exits 0" 0 "$INSTALLED_DIR/bin/cachyos-shelly-update" -l
+expectNoText "picked sources: AUR isn't checked" "foo-bin"
+expectNoText "picked sources: no AUR section" ":: AUR"
+expectExit "picked sources: cleanup exits 0" 0 "$INSTALLED_DIR/bin/cachyos-shelly-update" < /dev/null
+expectNoText "picked sources: no AUR cache question without AUR" "AUR build cache"
+expectText "picked sources: purify for the repositories" "purify standard --orphans --cache=1" "$SHELLY_LOG"
+unset FAKE_SHELLY_VERSION SHELLY_LOG_APPEND
+rm -f "$SHELLY_LOG"
 
 # ---------- lock ----------
 exec 9>"$XDG_RUNTIME_DIR/cachyos-shelly-update.lock"
