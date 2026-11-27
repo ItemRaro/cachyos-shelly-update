@@ -6,3 +6,4 @@
 #--no-appimage   # don't check/update AppImages through Shelly
 #--no-flatpak
 #--no-aur
+#--no-cleanup    # don't offer the cleanup after the update

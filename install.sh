@@ -4,10 +4,13 @@
 #
 #   ./install.sh install     install into /opt/cachyos-shelly-update (plus dependencies)
 #   ./install.sh update      update from the git repository
+#   ./install.sh sources     pick again what it updates (repositories, AUR,
+#                            Flatpak, AppImage, AppMan)
 #   ./install.sh uninstall   remove it (see --purge)
 #   ./install.sh status      show what is installed
 #
-# Options:  -y | --yes   don't ask anything: install the optional tools, and
+# Options:  -y | --yes   don't ask anything: every source not turned down
+#                        before is picked and its tools installed, and
 #                        pacman/yay get --noconfirm
 #           --purge      (uninstall) also delete the user's state and config, and
 #                        offer to remove the packages and AppMan this installer added
@@ -52,6 +55,10 @@ readonly INSTALLED_APPMAN_FILE=$PREFIX/installed-appman
 readonly APPMAN_URL=https://raw.githubusercontent.com/ivan-hc/AM/main/APP-MANAGER
 # Optional tools the user said no to, so a reinstall/update doesn't ask again
 readonly DECLINED_TOOLS_FILE=$PREFIX/declined-tools
+# The update sources picked (one key per line); the updater only checks,
+# updates and cleans these
+readonly SOURCES_FILE=$PREFIX/sources
+readonly SOURCE_KEYS=(repo aur flatpak appimage appman)
 # Every file installFiles put in place (a trailing / marks a directory it
 # owns), so an update removes what the new version no longer installs
 readonly MANIFEST_FILE=$PREFIX/installed-files
@@ -213,6 +220,16 @@ offerTool() {
     recordDeclined "$1"
     return 1
 }
+# Silent versions, for the source list's answers
+rememberDeclined() {
+    wasDeclined "$1" && return 0
+    printf '%s\n' "$1" | asRoot tee -a "$DECLINED_TOOLS_FILE" >/dev/null
+}
+forgetDeclined() {
+    wasDeclined "$1" || return 0
+    { grep -vxF "$1" "$DECLINED_TOOLS_FILE" || true; } | asRoot tee "$DECLINED_TOOLS_FILE.tmp" >/dev/null
+    asRoot mv -f "$DECLINED_TOOLS_FILE.tmp" "$DECLINED_TOOLS_FILE"
+}
 
 # yay: from the repositories when it's there (CachyOS has it), otherwise
 # built from the AUR (yay-bin) as the user, the way yay's README does it
@@ -329,6 +346,168 @@ offerAppman() {
     asUser rm -f "$downloadFile"
     printf '%s\n' "$binDir/appman" | asRoot tee "$INSTALLED_APPMAN_FILE" >/dev/null
     printStep "appman: ${GREEN}installed${RESET} (run 'appman -h' to get started)"
+}
+
+# ---------- update sources ----------
+# Picked from a list like eemeeve.sh's (numbers toggle, Enter applies). A
+# picked source whose tool is missing is offered for install; one left out
+# is never used, even if its tool is installed. Saved in $SOURCES_FILE, so
+# updates keep the choice; "install.sh sources" shows the list again.
+pickedSources=()
+
+sourceTitle() {
+    case $1 in
+        repo)     echo "Repositories (pacman packages)" ;;
+        aur)      echo "AUR" ;;
+        flatpak)  echo "Flatpak" ;;
+        appimage) echo "AppImage (through Shelly)" ;;
+        appman)   echo "AppMan apps" ;;
+    esac
+}
+
+# The tool a source needs on top of Shelly, if it is missing
+missingTool() {
+    case $1 in
+        flatpak) isSatisfied flatpak || echo "Flatpak" ;;
+        appman)  findAppman >/dev/null || echo "AppMan" ;;
+    esac
+    return 0
+}
+
+isPicked() {
+    local key
+    for key in "${pickedSources[@]}"; do [[ $key == "$1" ]] && return 0; done
+    return 1
+}
+
+# Without a saved choice: what is installed and wasn't turned down before;
+# with -y also what isn't installed yet (it gets installed)
+defaultSources() {
+    local key
+    for key in "${SOURCE_KEYS[@]}"; do
+        wasDeclined "$key" && continue
+        [[ -z $(missingTool "$key") ]] || ((assumeYes)) || continue
+        echo "$key"
+    done
+}
+
+readSavedSources() {
+    local key
+    pickedSources=()
+    for key in "${SOURCE_KEYS[@]}"; do
+        grep -qxF "$key" "$SOURCES_FILE" 2>/dev/null && pickedSources+=("$key")
+    done
+    return 0
+}
+
+# chooseSources [force]: the saved choice, or the list (always with force)
+chooseSources() {
+    local force=${1:-0} key answer number i missing
+    if ((!force)) && [[ -s $SOURCES_FILE ]]; then
+        readSavedSources
+        if ((${#pickedSources[@]})); then
+            for key in "${pickedSources[@]}"; do printStep "$(sourceTitle "$key")"; done
+            printStep "change them with: $PREFIX/install.sh sources"
+            return 0
+        fi
+    fi
+    if ((force)) && [[ -s $SOURCES_FILE ]]; then
+        readSavedSources
+    else
+        mapfile -t pickedSources < <(defaultSources)
+    fi
+    if ((assumeYes)); then
+        for key in "${pickedSources[@]}"; do printStep "$(sourceTitle "$key")"; done
+        return 0
+    fi
+    while true; do
+        echo
+        echo "What should $APP_NAME update? (toggle with the numbers, Enter to apply):"
+        i=0
+        for key in "${SOURCE_KEYS[@]}"; do
+            i=$((i + 1))
+            missing=$(missingTool "$key")
+            if isPicked "$key"; then
+                printf '  %d) %s[x]%s %s' "$i" "$GREEN" "$RESET" "$(sourceTitle "$key")"
+            else
+                printf '  %d) [ ] %s' "$i" "$(sourceTitle "$key")"
+            fi
+            [[ -n $missing ]] && printf ' %s(%s not installed: offered when picked)%s' "$YELLOW" "$missing" "$RESET"
+            echo
+        done
+        printf '  > '
+        # No terminal (EOF): keep what is shown
+        local atEnd=0
+        read -r answer || { atEnd=1; answer=""; }
+        [[ -t 0 ]] || echo
+        if [[ -z $answer ]]; then
+            ((${#pickedSources[@]})) && break
+            printWarning "Pick at least one source."
+            mapfile -t pickedSources < <(defaultSources)
+            if ((atEnd)); then
+                ((${#pickedSources[@]})) || pickedSources=(repo)
+                break
+            fi
+            continue
+        fi
+        for number in $answer; do
+            [[ $number =~ ^[0-9]+$ ]] || continue
+            ((number >= 1 && number <= ${#SOURCE_KEYS[@]})) || continue
+            key=${SOURCE_KEYS[number - 1]}
+            if isPicked "$key"; then
+                local kept=() other
+                for other in "${pickedSources[@]}"; do [[ $other == "$key" ]] || kept+=("$other"); done
+                pickedSources=("${kept[@]}")
+            else
+                pickedSources+=("$key")
+            fi
+        done
+    done
+    # Remember the "no"s for the next fresh choice; a "yes" clears an old "no"
+    for key in "${SOURCE_KEYS[@]}"; do
+        if isPicked "$key"; then
+            forgetDeclined "$key"
+            # Flatpak picked: its backend and Flathub may be offered again too
+            if [[ $key == flatpak ]]; then
+                forgetDeclined flatpak-backend
+                forgetDeclined flathub
+            fi
+        else
+            rememberDeclined "$key"
+        fi
+    done
+}
+
+# Write the choice, without sources whose tool still isn't there
+saveSources() {
+    local key kept=() missing
+    for key in "${SOURCE_KEYS[@]}"; do
+        isPicked "$key" || continue
+        missing=$(missingTool "$key")
+        if [[ -n $missing ]]; then
+            printWarning "$missing isn't installed: $(sourceTitle "$key") left out (pick it again with: $PREFIX/install.sh sources)"
+            continue
+        fi
+        kept+=("$key")
+    done
+    pickedSources=("${kept[@]}")
+    printf '%s\n' "${pickedSources[@]}" | asRoot tee "$SOURCES_FILE" >/dev/null
+}
+
+# Install the tools of the picked sources
+offerSourceTools() {
+    if isPicked flatpak; then
+        printInfo "Checking Flatpak"
+        offerFlatpak
+    fi
+    recordInstalledPackages
+}
+offerSourceUserTools() {
+    if isPicked appman; then
+        printInfo "Checking AppMan"
+        offerAppman
+    fi
+    recordInstalledPackages
 }
 
 # ---------- Python virtualenv for the tray ----------
@@ -680,13 +859,12 @@ cmdInstall() {
     printInfo "Checking optional tools"
     offerAurHelper              # first: the dependencies may need it for the AUR
     ensureDependencies
-    printInfo "Checking Flatpak"
-    offerFlatpak
-    recordInstalledPackages
+    printInfo "Update sources"
+    chooseSources
+    offerSourceTools
     installFiles
-    printInfo "Checking AppMan"
-    offerAppman
-    recordInstalledPackages
+    offerSourceUserTools
+    saveSources
     disableCachyUpdate
     enableServices
     checkIcons
@@ -738,6 +916,19 @@ cmdUpdate() {
         exit 0
     fi
     CACHYOS_SHELLY_UPDATE_REPO="$repoUrl" bash "$UPDATE_TEMP_DIR/repo/install.sh" install "${forwardedArgs[@]}"
+}
+
+# Show the source list again and install the tools of newly picked sources
+cmdSources() {
+    [[ -f $PREFIX/VERSION ]] || die "$APP_NAME isn't installed. Run: $0 install"
+    ((EUID != 0)) && { sudo -v || die "sudo is required"; }
+    printInfo "Update sources"
+    chooseSources 1
+    offerSourceTools
+    offerSourceUserTools
+    saveSources
+    echo
+    printInfo "Saved. The next check uses them: $(printf '%s ' "${pickedSources[@]}")"
 }
 
 # Called by the pacman hook after python is upgraded (runs as root, no prompts):
@@ -840,7 +1031,7 @@ cmdStatus() {
     [[ -f $PREFIX/REPO ]] && printStep "source: $(cat "$PREFIX/REPO")"
 
     printInfo "Dependencies"
-    local entry dependency repoPackage aurPackage requirement appmanPath
+    local entry dependency repoPackage aurPackage requirement appmanPath key
     for entry in "${DEPENDENCIES[@]}"; do
         IFS='|' read -r dependency repoPackage aurPackage requirement <<<"$entry"
         if isSatisfied "$dependency"; then
@@ -871,6 +1062,14 @@ cmdStatus() {
         printStep "tray (PyQt6 in the virtualenv): ${RED}broken or missing${RESET} (run: $PREFIX/install.sh update)"
     fi
 
+    printInfo "Update sources"
+    if [[ -s $SOURCES_FILE ]]; then
+        readSavedSources
+        for key in "${pickedSources[@]}"; do printStep "$(sourceTitle "$key")"; done
+    else
+        printStep "all (none picked yet: $PREFIX/install.sh sources)"
+    fi
+
     printInfo "Services"
     printStep "timer: $(asUser systemctl --user is-active "$APP_NAME.timer" 2>/dev/null || echo inactive)"
     if pgrep -f "$TRAY_PROCESS_PATTERN" >/dev/null; then printStep "tray: running"; else printStep "tray: stopped"; fi
@@ -888,7 +1087,7 @@ main() {
     local command=""
     while (($#)); do
         case "$1" in
-            install|update|uninstall|status|rebuild-venv) command="$1" ;;
+            install|update|sources|uninstall|status|rebuild-venv) command="$1" ;;
             -y|--yes)  assumeYes=1; forwardedArgs+=(-y) ;;
             --purge)   purge=1 ;;
             -h|--help) showHelp; exit 0 ;;
@@ -899,6 +1098,7 @@ main() {
     case "$command" in
         install)      cmdInstall ;;
         update)       cmdUpdate ;;
+        sources)      cmdSources ;;
         uninstall)    cmdUninstall ;;
         status)       cmdStatus ;;
         rebuild-venv) cmdRebuildVenv ;;

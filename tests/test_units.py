@@ -254,6 +254,125 @@ class OptionTests(unittest.TestCase):
             cli.parseOptions(["--no-snap"], "1.0")
 
 
+
+class SourceChoiceTests(unittest.TestCase):
+    """The sources picked in the installer ($PREFIX/sources)."""
+
+    def setUp(self):
+        self.prefix = Path(tempfile.mkdtemp(prefix="shellyupdate-prefix.", dir=TEMP_ROOT))
+
+    def testNoChoiceMeansEverySource(self):
+        self.assertIsNone(core.readPickedSources(str(self.prefix)))
+
+    def testChoiceIgnoresUnknownKeys(self):
+        (self.prefix / "sources").write_text("repo\nappman\nsnap\n\n")
+        self.assertEqual(core.readPickedSources(str(self.prefix)), {"repo", "appman"})
+
+    def testShellyVersion(self):
+        self.assertEqual(core.parseShellyVersion("3.4.1\n"), (3, 4, 1))
+        self.assertEqual(core.parseShellyVersion("shelly 3.10.0-1"), (3, 10, 0))
+        self.assertIsNone(core.parseShellyVersion(""))
+        self.assertTrue(cli.shellyCanClean((3, 2, 0)))
+        self.assertTrue(cli.shellyCanClean((3, 10, 0)))
+        self.assertFalse(cli.shellyCanClean((3, 0, 3)))
+        self.assertFalse(cli.shellyCanClean(None))
+
+
+class CleanupTests(unittest.TestCase):
+    """The cleanup after an update: Shelly's purify and AppMan's clean, for
+    the picked sources only."""
+
+    def setUp(self):
+        core.CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        core.CONFIG_FILE.unlink(missing_ok=True)
+        self.version = "3.4.1"
+        self.ranCommands: list[list[str]] = []
+        self.answers: list[str] = []
+        self.prompts: list[str] = []
+        patches = [
+            mock.patch("shellyupdate.sources.runQuiet", side_effect=lambda command, *rest: self.version),
+            mock.patch("subprocess.run", side_effect=self.fakeRun),
+            mock.patch("builtins.input", side_effect=self.fakeInput),
+            mock.patch("sys.stdout"),
+        ]
+        for patcher in patches:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def fakeRun(self, command, *arguments, **keywords):
+        self.ranCommands.append(command)
+        return mock.Mock(returncode=0)
+
+    def fakeInput(self, prompt):
+        self.prompts.append(prompt)
+        if not self.answers:
+            raise EOFError
+        return self.answers.pop(0)
+
+    def cleanUp(self, *arguments, appman="/home/u/.local/bin/appman"):
+        cli.offerCleanup(cli.parseOptions(list(arguments), "1.0"), appman)
+
+    def testAskDefaultsAndNoTerminal(self):
+        self.answers = ["", "", "y", "nope"]
+        self.assertTrue(cli.ask("q", True))
+        self.assertFalse(cli.ask("q", False))
+        self.assertTrue(cli.ask("q", False))
+        self.assertFalse(cli.ask("q", True))
+        self.assertFalse(cli.ask("q", True), "no terminal (EOF) must be no")
+
+    def testEverySourceCleansThroughItsTool(self):
+        self.answers = ["y", ""]          # AUR cache: yes; AppMan clean: default (yes)
+        self.cleanUp()
+        self.assertEqual(self.ranCommands, [
+            ["shelly", "purify", "standard", "--orphans", "--cache=1", "--aur-cache"],
+            ["shelly", "purify", "flatpak"],
+            ["/home/u/.local/bin/appman", "-c"],
+        ])
+
+    def testAurCacheIsKeptByDefault(self):
+        self.answers = ["", "n"]
+        self.cleanUp("--no-flatpak")
+        self.assertEqual(self.ranCommands, [["shelly", "purify", "standard", "--orphans", "--cache=1"]])
+
+    def testNoTerminalAsksNothingDestructive(self):
+        self.cleanUp("--no-flatpak")        # every input() raises EOFError
+        self.assertEqual(self.ranCommands, [["shelly", "purify", "standard", "--orphans", "--cache=1"]],
+                         "only Shelly's purify, which asks (and cancels) on its own")
+
+    def testOnlyPickedSources(self):
+        self.cleanUp("--no-repo", "--no-aur", "--no-appman")
+        self.assertEqual(self.ranCommands, [["shelly", "purify", "flatpak"]])
+        self.assertEqual(self.prompts, [], "nothing to ask without AUR and AppMan")
+
+    def testRepositoriesWithoutAurDontAskAboutTheAurCache(self):
+        self.cleanUp("--no-aur", "--no-flatpak", "--no-appman")
+        self.assertEqual(self.prompts, [])
+        self.assertEqual(self.ranCommands, [["shelly", "purify", "standard", "--orphans", "--cache=1"]])
+
+    def testAppmanCleanOnlyWhenAppmanIsThere(self):
+        self.cleanUp("--no-repo", "--no-aur", "--no-flatpak", appman=None)
+        self.assertEqual(self.ranCommands, [])
+
+    def testAssumeYesOnlyShowsTheCommands(self):
+        self.cleanUp("-y")
+        self.assertEqual(self.ranCommands, [])
+        self.assertEqual(self.prompts, [])
+
+    def testNoCleanup(self):
+        self.cleanUp("--no-cleanup")
+        self.assertEqual((self.ranCommands, self.prompts), ([], []))
+
+    def testOldShellySkipsItsPartButNotAppman(self):
+        self.version = "3.0.3"
+        self.answers = ["y"]
+        self.cleanUp()
+        self.assertEqual(self.ranCommands, [["/home/u/.local/bin/appman", "-c"]])
+
+    def testCleanupCommandsForTheHint(self):
+        options = cli.parseOptions(["--no-flatpak"], "1.0")
+        self.assertEqual(cli.cleanupCommands(options, None),
+                         [["shelly", "purify", "standard", "--orphans", "--cache=1", "--aur-cache"]])
+
 class TerminalTests(unittest.TestCase):
     """The default terminal lookup, with fake terminal executables on PATH."""
 

@@ -6,11 +6,25 @@ An updater in the style of [cachy-update](https://github.com/CachyOS/cachy-updat
 
 ## What it does
 
-- **`cachyos-shelly-update`** lists the updates grouped by source, asks, runs `shelly upgrade all` and then `appman -u`. Afterwards it shows pending `.pacnew` files and orphan packages, and warns when the kernel changed.
+- **`cachyos-shelly-update`** lists the updates grouped by source, asks, runs `shelly upgrade all` and then `appman -u`. Then it offers the cleanup (see [Cleanup](#cleanup)), shows pending `.pacnew` files and warns when the kernel changed.
+- **Modular**: you pick the sources it handles (repositories, AUR, Flatpak, AppImage, AppMan) when installing. Only those are checked, updated and cleaned; a source you left out is never touched, even if its tool is installed.
 - **Automatic checks**: a systemd timer runs `cachyos-shelly-update --check` 2 minutes after login and then every hour. A notification shows up when new updates appear. Checks never take pacman's database lock (see [No locks](#no-locks)), so they can't get in the way of pacman, Shelly or yay.
 - **Tray icon**: looks and behaves like cachy-update's: the same icons, following `TrayIconStyle`, `ColorblindMode` and `ShowTrayWhenRelevant` from `arch-update.conf`, and the same menu.
   - Left click opens the updater in your default terminal emulator (see [Terminal](#terminal)).
   - Right click shows the number of updates, one entry per source with its count (Packages, AUR, Flatpak, AppImage, AppMan; only sources with updates), the last and next check, and "Run CachyOS-Shelly-Update", "Check for updates" and "Exit".
+
+### Cleanup
+
+After the update (and also when there was nothing to update, like cachy-update), each picked source is cleaned by its own tool:
+
+| Source | What runs | What it removes |
+|---|---|---|
+| Repositories, AUR | `shelly purify standard --orphans --cache=1` | orphan packages, old versions in pacman's cache (keeps 1 of each), corrupted downloads |
+| AUR | adds `--aur-cache`, **only if you say yes** (default no) | Shelly's AUR build cache: sources and builds, downloaded again on the next AUR update |
+| Flatpak | `shelly purify flatpak` | unused runtimes and extensions |
+| AppMan | `appman -c`, asked (default yes) | AppMan's cache, apps' cached files, launchers of removed apps, broken links in `~/.local/bin`, old modules |
+
+Shelly lists what it would remove and asks before removing anything. The upgrade's own cache step is turned off (`--disable-cache-clean`), so the cache is cleaned once, here. Needs Shelly 3.2.0 or newer. With `-y` nothing is removed: the commands are printed instead. `--no-cleanup` skips it.
 
 ### AppMan
 
@@ -56,8 +70,11 @@ The installer:
 1. Asks to install **yay** when there is no AUR helper (yay or paru): from the repositories (CachyOS has it), or built from the AUR (`yay-bin`) otherwise.
 2. Checks for and installs the dependencies: `shelly`, `python`, `pacman-contrib`, `libnotify` and `curl`, plus tools AppMan uses to unpack apps (`wget`, `unzip`, `7zip`, `binutils`, `file`, `xz`; optional).
    It looks in the repositories first (CachyOS already ships Shelly). If a package isn't there and yay or paru is installed, it uses the `-bin` version from the AUR. Packages that only *provide* a dependency, like `shelly-bin`, count too.
-3. Asks to install **Flatpak** with Shelly's Flatpak backend and the **Flathub** remote when they're missing.
-4. Asks to install **AppMan** in `~/.local/bin/appman` if you don't have it, the same way AppMan's own installer does. It isn't configured: the first `appman -i <app>` asks where to keep apps.
+3. Shows the list of **update sources** (repositories, AUR, Flatpak, AppImage, AppMan): toggle with the numbers, Enter to apply. What is installed is picked to start with. A picked source whose tool is missing is offered for install:
+   - **Flatpak**, with Shelly's Flatpak backend and the **Flathub** remote;
+   - **AppMan**, in `~/.local/bin/appman`, the same way AppMan's own installer does. It isn't configured: the first `appman -i <app>` asks where to keep apps.
+
+   A source left out stays off even if its tool is installed. The choice is saved in `/opt/cachyos-shelly-update/sources` and kept by `update`; `install.sh sources` shows the list again.
 5. Copies the files to **`/opt/cachyos-shelly-update`**. The installation doesn't depend on the repository, so the clone can be deleted afterwards.
 6. Creates the project's Python virtualenv in `/opt/cachyos-shelly-update/.venv` with the tray's dependency (PyQt6, pinned in `requirements.txt`), so nothing is added to the system Python. The command and the tray both run on it. The command only needs the standard library, so if the virtualenv is ever broken (its Python gone, a rebuild that failed) it runs on the system `python3` instead, and the hourly check keeps working. A pacman hook rebuilds the virtualenv and the precompiled code when the `python` package moves to a new version.
 7. Creates the `/usr/local/bin/cachyos-shelly-update` link, the app menu entry, the tray autostart and the systemd user timer.
@@ -67,6 +84,7 @@ The installer:
 
 ```bash
 /opt/cachyos-shelly-update/install.sh update              # fetch the new version from git and reinstall
+/opt/cachyos-shelly-update/install.sh sources             # pick the update sources again
 /opt/cachyos-shelly-update/install.sh uninstall           # remove it (dependencies stay)
 /opt/cachyos-shelly-update/install.sh uninstall --purge   # also delete your state/config and offer to
                                                           # remove the packages and AppMan it installed
@@ -79,7 +97,7 @@ Any installed version can update to the latest one: the installed `install.sh` d
 
 Uninstalling always removes the virtualenv with everything else in `/opt/cachyos-shelly-update`. If cachy-update was on before the install, it asks whether to turn it back on (default: yes) and restores exactly what was on, including your own autostart file. With `--purge` it also offers to remove what the installer added: only the packages it installed itself (each one is kept if another package still needs it) and AppMan, if it downloaded it. Apps you installed with AppMan are never touched.
 
-`-y` / `--yes` answers everything automatically (pacman and yay get `--noconfirm`).
+`-y` / `--yes` answers everything automatically (pacman and yay get `--noconfirm`); without a saved choice it picks every source you didn't turn down before and installs its tools.
 
 ## Usage
 
@@ -90,7 +108,8 @@ Uninstalling always removes the virtualenv with everything else in `/opt/cachyos
 | `cachyos-shelly-update -y` | update without asking |
 | `cachyos-shelly-update -c` | silent check (the one the timer uses) |
 | `cachyos-shelly-update --tray` | start the tray icon |
-| `--no-repo` `--no-aur` `--no-flatpak` `--no-appimage` `--no-appman` `--no-devel` | skip sources |
+| `--no-repo` `--no-aur` `--no-flatpak` `--no-appimage` `--no-appman` `--no-devel` | skip sources (on top of the installer's choice) |
+| `--no-cleanup` | don't offer the cleanup |
 
 To make options permanent, create `~/.config/cachyos-shelly-update/cachyos-shelly-update.conf` with one option per line. There is an example in `/opt/cachyos-shelly-update/cachyos-shelly-update.conf.example`.
 
@@ -146,7 +165,7 @@ PYTHONPATH=src QT_QPA_PLATFORM=offscreen python tests/tray_smoke.py
 
 | Path | Contents |
 |---|---|
-| `/opt/cachyos-shelly-update/` | the program, `install.sh`, `VERSION`, `REPO`, the `.venv` virtualenv, `installed-files` (what the installer put where) |
+| `/opt/cachyos-shelly-update/` | the program, `install.sh`, `VERSION`, `REPO`, the `.venv` virtualenv, `installed-files` (what the installer put where), `sources` (the picked sources) |
 | `/usr/local/bin/cachyos-shelly-update` | link to the command |
 | `/usr/local/share/applications/cachyos-shelly-update.desktop` | app menu entry |
 | `/etc/xdg/autostart/cachyos-shelly-update-tray.desktop` | tray at session start |

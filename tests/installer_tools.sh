@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # Tests install.sh's optional tools: offering an AUR helper (yay), Flatpak
-# with Shelly's backend and Flathub, and AppMan when they are missing.
+# with Shelly's backend and Flathub, and AppMan when they are missing; and
+# the list of update sources (picked, saved, their tools offered).
 # Runs the real installer functions against fake pacman/flatpak/git/makepkg/
 # curl/sudo, from a copy of install.sh whose /opt path points into a
 # temporary directory: nothing real is touched.
@@ -195,6 +196,70 @@ runInstaller "$OFFER_ALL"
 check "F: no questions when everything is installed" not outputHas "?"
 check "F: no packages installed" not called "pacman -S "
 check "F: reports them" outputHas "flathub: "
+
+
+# ---------- update sources ----------
+sources()      { tr '\n' ' ' < "$PREFIX_DIR/sources" 2>/dev/null; }
+hasSources()   { [[ "$(sources)" == "$1" ]]; }
+CHOOSE="chooseSources; offerSourceTools; offerSourceUserTools; saveSources"
+
+# G: nothing optional installed, Enter: what is there is picked, the rest remembered as "no"
+resetState "" "flatpak shelly-flatpak-backend" ""
+runInstaller "$CHOOSE" ""
+check "G: shows the list" outputHas "What should cachyos-shelly-update update?"
+check "G: says what isn't installed" outputHas "Flatpak not installed: offered when picked"
+check "G: picks what Shelly covers" hasSources "repo aur appimage "
+check "G: installs nothing" not isInstalled flatpak
+check "G: remembers Flatpak as not wanted" declined flatpak
+check "G: remembers AppMan as not wanted" declined appman
+
+# H: picking Flatpak and AppMan offers and installs them
+resetState "" "flatpak shelly-flatpak-backend" ""
+runInstaller "$CHOOSE" $'3 5\n\ny\ny\ny'
+check "H: Flatpak installed" isInstalled flatpak
+check "H: with Shelly's backend" isInstalled shelly-flatpak-backend
+check "H: AppMan downloaded" test -x "$HOME_DIR/.local/bin/appman"
+check "H: both saved" hasSources "repo aur flatpak appimage appman "
+check "H: no \"no\" left behind" not declined flatpak
+
+# I: Flatpak installed but left out: never used
+resetState "flatpak shelly-flatpak-backend" "" "flathub"
+runInstaller "$CHOOSE" $'3\n'
+check "I: Flatpak left out" hasSources "repo aur appimage "
+check "I: remembered" declined flatpak
+
+# J: a saved choice is kept without asking (updates)
+runInstaller "$CHOOSE" ""
+check "J: no list when a choice is saved" not outputHas "What should"
+check "J: shows the saved choice" outputHas "change them with:"
+check "J: keeps it" hasSources "repo aur appimage "
+
+# K: "install.sh sources" shows the list again, starting from the saved choice
+runInstaller "chooseSources 1; offerSourceTools; offerSourceUserTools; saveSources" $'3\n'
+check "K: shows the list again" outputHas "What should"
+check "K: Flatpak picked again" hasSources "repo aur flatpak appimage "
+check "K: its \"no\" is cleared" not declined flatpak
+
+# L: picked, but its install turned down: left out, with a warning
+resetState "" "flatpak shelly-flatpak-backend" ""
+runInstaller "$CHOOSE" $'3\n\nn'
+check "L: Flatpak not installed" not isInstalled flatpak
+check "L: left out of the choice" hasSources "repo aur appimage "
+check "L: says so" outputHas "Flatpak isn't installed"
+
+# M: -y picks everything not turned down before, and installs it
+resetState "" "flatpak shelly-flatpak-backend" ""
+printf 'appman\n' > "$PREFIX_DIR/declined-tools"
+ASSUME_YES=1 runInstaller "$CHOOSE"
+check "M: -y doesn't show the list" not outputHas "What should"
+check "M: -y installs Flatpak" isInstalled flatpak
+check "M: -y respects an earlier \"no\"" hasSources "repo aur flatpak appimage "
+
+# N: unpicking everything isn't accepted
+resetState "" "" ""
+runInstaller "$CHOOSE" $'1 2 4\n\n'
+check "N: asks for at least one" outputHas "Pick at least one source."
+check "N: falls back to the defaults" hasSources "repo aur appimage "
 
 echo
 if ((failureCount)); then echo "$failureCount test(s) failed"; exit 1; fi

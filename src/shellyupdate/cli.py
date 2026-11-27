@@ -25,6 +25,9 @@ Usage:
   cachyos-shelly-update -l          only list what can be updated
   cachyos-shelly-update -y          update without asking (uses Shelly's -n)
   cachyos-shelly-update --tray      start the tray icon
+  cachyos-shelly-update --no-cleanup
+                                    don't offer the cleanup after the update
+                                    (orphans, old cached packages, AppMan leftovers)
   cachyos-shelly-update --no-repo --no-aur --no-flatpak --no-appimage
                         --no-appman --no-devel
                                     skip specific sources
@@ -33,6 +36,9 @@ Usage:
 
 Optional config: ~/.config/cachyos-shelly-update/cachyos-shelly-update.conf
   (the same options as above, one per line, e.g. --no-devel)
+
+Only the sources picked in the installer are used; change them with:
+  /opt/cachyos-shelly-update/install.sh sources
 
 Update/remove: /opt/cachyos-shelly-update/install.sh {update|uninstall}"""
 
@@ -63,6 +69,7 @@ class Options:
         self.mode = "update"            # update | check | list | tray
         self.assumeYes = False
         self.skipDevel = False
+        self.skipCleanup = False        # --no-cleanup: no cleanup questions after the update
         self.waitAtExit = False         # --wait: keep the terminal open at the end (used by the tray)
         self.enabledSources = set(core.SOURCE_KEYS)
 
@@ -77,6 +84,8 @@ class Options:
             self.assumeYes = True
         elif option == "--no-devel":
             self.skipDevel = True
+        elif option == "--no-cleanup":
+            self.skipCleanup = True
         elif option == "--wait":
             self.waitAtExit = True
         elif option == "--appman":
@@ -185,19 +194,94 @@ def showUpdateList(options: Options) -> None:
     print()
 
 
+def ask(question: str, default: bool) -> bool:
+    """A [Y/n] or [y/N] question. No terminal to answer (EOF) is always no."""
+    choices = "[Y/n]" if default else "[y/N]"
+    try:
+        answer = input(f"{CYAN}{BOLD}::{RESET} {question} {choices} ").strip().lower()
+    except EOFError:
+        print()
+        return False
+    return default if not answer else answer in ("y", "yes")
+
+
+def shellyVersion() -> tuple[int, int, int] | None:
+    return core.parseShellyVersion(sources.runQuiet(["shelly", "--version"]))
+
+
+def shellyCanClean(version: tuple[int, int, int] | None) -> bool:
+    return version is not None and version >= core.SHELLY_CLEANUP_VERSION
+
+
+def purifyStandardCommand(clearAurCache: bool) -> list[str]:
+    command = ["shelly", "purify", "standard", "--orphans", f"--cache={core.CACHE_VERSIONS_KEPT}"]
+    return [*command, "--aur-cache"] if clearAurCache else command
+
+
+def cleanupCommands(options: Options, appmanBin: str | None) -> list[list[str]]:
+    """Every cleanup command for the picked sources (shown when it can't ask)."""
+    commands = []
+    if {"repo", "aur"} & options.enabledSources:
+        commands.append(purifyStandardCommand("aur" in options.enabledSources))
+    if "flatpak" in options.enabledSources:
+        commands.append(["shelly", "purify", "flatpak"])
+    if "appman" in options.enabledSources and appmanBin:
+        commands.append([appmanBin, "-c"])
+    return commands
+
+
+def runCleanupStep(command: list[str], failure: str) -> None:
+    if subprocess.run(command).returncode != 0:
+        printWarning(failure)
+
+
+def offerCleanup(options: Options, appmanBin: str | None) -> None:
+    """Like cachy-update after an update, but through each source's own tool,
+    for the picked sources only: Shelly's purify (orphans, pacman's cache,
+    optionally the AUR build cache; unused Flatpak runtimes), then AppMan's
+    clean. Shelly lists what it would remove and asks before removing it.
+    With -y nothing is removed: the commands are printed instead."""
+    if options.skipCleanup:
+        return
+    commands = cleanupCommands(options, appmanBin)
+    if not commands:
+        return
+    printTitle("Cleanup")
+    if options.assumeYes:
+        print("   Skipped with -y. To clean up, run:")
+        print("\n".join(f"     {' '.join(command)}" for command in commands))
+        return
+    shellySources = {"repo", "aur", "flatpak"} & options.enabledSources
+    version = shellyVersion() if shellySources else None
+    if shellySources and not shellyCanClean(version):
+        found = ".".join(map(str, version)) if version else "unknown"
+        required = ".".join(map(str, core.SHELLY_CLEANUP_VERSION))
+        printWarning(f"Shelly {found} can't do the cleanup (needs {required} or newer): update Shelly.")
+        shellySources = set()
+    if {"repo", "aur"} & shellySources:
+        clearAurCache = "aur" in shellySources and ask(
+            "Also clear Shelly's AUR build cache (sources and builds; the next AUR update downloads them again)?",
+            False)
+        print("   Orphan packages and old cached packages "
+              f"(keeping {core.CACHE_VERSIONS_KEPT} version of each):")
+        runCleanupStep(purifyStandardCommand(clearAurCache), "shelly purify standard failed.")
+    if "flatpak" in shellySources:
+        print("   Unused Flatpak runtimes and extensions:")
+        runCleanupStep(["shelly", "purify", "flatpak"], "shelly purify flatpak failed.")
+    if "appman" in options.enabledSources and appmanBin and ask(
+            "Clean AppMan leftovers (its cache, apps' cached files, launchers of removed apps, "
+            "broken links in ~/.local/bin, old modules)?", True):
+        runCleanupStep([appmanBin, "-c"], "appman -c failed.")
+
+
 def showPostUpdateChecks() -> None:
-    """Like arch-update: pending .pacnew files, orphans, replaced kernel."""
+    """Like arch-update: pending .pacnew files, replaced kernel."""
     if shutil.which("pacdiff"):
         pacnewFiles = sources.runQuiet(["pacdiff", "-o"]).strip()
         if pacnewFiles:
             printTitle("Pending .pacnew/.pacsave files")
             print("\n".join(f"   {line}" for line in pacnewFiles.splitlines()))
             print("   Review them with: sudo pacdiff -s")
-    orphanPackages = sources.runQuiet(["pacman", "-Qtdq"]).strip()
-    if orphanPackages:
-        printTitle("Orphan packages")
-        print("\n".join(f"   {line}" for line in orphanPackages.splitlines()))
-        print("   Remove them with: sudo pacman -Rns $(pacman -Qtdq)")
     kernelRelease = os.uname().release
     if not os.path.isdir(f"/usr/lib/modules/{kernelRelease}"):
         printTitle("Reboot recommended")
@@ -219,6 +303,9 @@ def main(selfPath: str, prefix: str, libDir: str, arguments: list[str]) -> int:
         sys.stdout.reconfigure(line_buffering=True)   # keep our lines in order with child output
     core.STATE_DIR.mkdir(parents=True, exist_ok=True)
     options = parseOptions(arguments, readVersion(prefix))
+    pickedSources = core.readPickedSources(prefix)
+    if pickedSources is not None:
+        options.enabledSources &= pickedSources     # the installer's choice is the limit
 
     def finish(exitCode: int) -> int:
         if options.waitAtExit:
@@ -265,25 +352,27 @@ def main(selfPath: str, prefix: str, libDir: str, arguments: list[str]) -> int:
     totalUpdateCount = shellyUpdateCount + appmanUpdateCount
     if totalUpdateCount == 0:
         printInfo("System is up to date. Nothing to do.")
+        if options.mode == "update":
+            offerCleanup(options, appmanBin)   # cachy-update offers it here too
         return finish(0)
     printInfo(f"Available updates: {totalUpdateCount}")
     if options.mode == "list":
         return finish(0)
 
-    if not options.assumeYes:
-        try:
-            answer = input(f"{CYAN}{BOLD}::{RESET} Proceed with the update? [Y/n] ").strip().lower()
-        except EOFError:
-            answer = "n"                # no terminal to answer: don't update
-        if answer not in ("", "y", "yes"):
-            printInfo("Cancelled.")
-            return finish(0)
+    # No terminal to answer (EOF): don't update
+    if not options.assumeYes and not ask("Proceed with the update?", True):
+        printInfo("Cancelled.")
+        return finish(0)
 
     # ---------- update ----------
     upgradeArgs = ["-n", "upgrade", "all"]    # -n: we already asked above
     upgradeArgs += [f"--no-{key}" for key in core.SHELLY_SOURCE_KEYS if key not in options.enabledSources]
     if options.skipDevel:
         upgradeArgs.append("--no-devel")
+    if shellyUpdateCount > 0 and shellyCanClean(shellyVersion()):
+        # The cache is cleaned once, by the cleanup below (with -n, the upgrade
+        # would clean it on its own, keeping 3 versions)
+        upgradeArgs.append("--disable-cache-clean")
 
     exitStatus = 0
     if shellyUpdateCount > 0:
@@ -297,6 +386,7 @@ def main(selfPath: str, prefix: str, libDir: str, arguments: list[str]) -> int:
             exitStatus = 1
             printError("appman -u failed.")
 
+    offerCleanup(options, appmanBin)
     if {"repo", "aur"} & options.enabledSources:
         showPostUpdateChecks()
 
